@@ -29,7 +29,7 @@ MODELS = {
     "simple_chat": "deepseek-v4.1-flash",
     "smart_chat": "gpt-6.1-sol",
     "news_analysis": "gpt-6.1-sol",
-    "code_review": "gpt-6.1-sol", # Для кода лучше использовать умную модель
+    "code_review": "gpt-6.1-sol", 
     "background": "claude-haiku-5.5",
     "image": "z-image-turbo"
 }
@@ -52,16 +52,16 @@ SYSTEM_PROMPT = (
 
 CODE_PROMPT = (
     "Ты — Дед-пердед, но сейчас ты выступаешь в роли опытного, циничного и ворчливого Senior-разработчика. "
-    "Твоя задача — проанализировать код или ошибку, которую прислал пользователь. "
+    "Твоя задача — проанализировать код, ошибку или технический вопрос, который прислал пользователь. "
     "Найди баги, укажи на плохой стиль, объясни, почему код не работает (если это ошибка), и дай рекомендации по исправлению. "
     "Ты можешь быть токсичным и грубым (использовать мат), если пользователь написал полную чушь, но твои технические советы должны быть точными и полезными. "
-    "Если код хороший — похвали сквозь зубы, чтобы не зазнавался."
+    "Если код хороший — похвали сквозь зубы. Если это просто вопрос 'умеешь ли ты кодить' — ответь с достоинством, что ты старый хакер."
 )
 
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "draw"]
-# Триггеры для анализа кода
-CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "def ", "import ", "```"]
+# Триггеры для анализа кода (добавил "кодить" и другие синонимы)
+CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```"]
 
 user_histories = {} 
 chat_contexts = {}  
@@ -117,8 +117,6 @@ async def handle_message(message: types.Message):
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
     is_news = message.forward_from_chat or message.forward_from or "http" in text_lower 
-    
-    # Проверяем, похоже ли это на код или запрос о помощи с кодом
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in message.text
 
     # --- ЛОГИКА РИСОВАНИЯ ---
@@ -175,17 +173,17 @@ async def handle_message(message: types.Message):
 
     # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА И АНАЛИЗА КОДА ---
     if chat_type in ["group", "supergroup"]:
-        # В группах отвечаем, если позвали, ответили реплаем, прислали новость или КОД
         if not (is_triggered or is_reply_to_bot or is_news or is_code_request):
             return
 
     if user_id not in user_histories:
         user_histories[user_id] = []
     
-    # Выбираем задачу и промпт
+    # ВЫБОР ЗАДАЧИ И ТЕКСТА ПРОМПТА (ИСПРАВЛЕНО)
     if is_code_request:
         task = "code_review"
         active_prompt = CODE_PROMPT
+        prompt_text = message.text # <--- ТЕПЕРЬ ПЕРЕМЕННАЯ НА МЕСТЕ
         logging.info("Запуск анализа кода...")
     elif is_news:
         task = "news_analysis"
@@ -194,10 +192,6 @@ async def handle_message(message: types.Message):
     else:
         task = "smart_chat" if (is_triggered or is_reply_to_bot) else "simple_chat"
         active_prompt = SYSTEM_PROMPT
-        prompt_text = message.text
-
-    # Если это не код, используем обычный текст
-    if not is_code_request:
         prompt_text = message.text
 
     user_histories[user_id].append({"role": "user", "content": prompt_text})
