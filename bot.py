@@ -2,9 +2,12 @@ import os
 import logging
 import random
 import asyncio
+import base64
+import httpx
 from difflib import get_close_matches
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
+from aiogram.types import BufferedInputFile
 from openai import AsyncOpenAI
 
 logging.basicConfig(level=logging.INFO)
@@ -20,13 +23,12 @@ client = AsyncOpenAI(
     base_url="https://plusvibeapi.ru/v1"
 )
 
-# --- НАСТРОЙКИ МОДЕЛЕЙ ---
 MODELS = {
     "simple_chat": "deepseek-v4.1-flash",
     "smart_chat": "gpt-6.1-sol",
     "news_analysis": "gpt-6.1-sol",
     "background": "claude-haiku-5.5",
-    "image": "z-image-turbo"
+    "image": "z-image-turbo" 
 }
 
 def get_model(task_type: str) -> str:
@@ -42,7 +44,6 @@ SYSTEM_PROMPT = (
     "НО! Если пользователь грубит тебе, оскорбляет или пытается унизить — ты моментально снимаешь маску интеллигента. "
     "В этом случае ты становишься злым, токсичным и грубым. Ты умеешь и любишь материться, посылать нахуй и оскорблять в ответ. "
     "Ты никогда не начинаешь материться первым, но если тебя задели — сдачу даешь жестко. "
-    "Ты можешь вступать в дискуссии, комментировать новости и репосты. "
     "Отвечай коротко (1-3 предложения)."
 )
 
@@ -99,40 +100,30 @@ async def handle_message(message: types.Message):
         chat_contexts[chat_id].pop(0)
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
+    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
     is_news = message.forward_from_chat or message.forward_from or "http" in text_lower 
-    
-    # Проверяем, просят ли нарисовать
-    is_draw_request = any(word in text_lower for word in DRAW_TRIGGERS)
-
-    # Если это группа, проверяем, обращаются ли к боту
-    if chat_type in ["group", "supergroup"]:
-        if not (is_triggered or is_reply_to_bot or is_news or is_draw_request):
-            return
 
     # --- ЛОГИКА РИСОВАНИЯ ---
     if is_draw_request:
-        # В группах рисуем только если позвали по имени или ответили реплаем
         if chat_type in ["group", "supergroup"] and not (is_triggered or is_reply_to_bot):
             return
-            
+
         await bot.send_chat_action(chat_id=chat_id, action="upload_photo")
-        
         try:
-            # 1. Выделяем чистый промпт из сообщения с помощью дешевой модели
+            # 1. Выделяем чистый промпт
             extract_response = await client.chat.completions.create(
                 model=get_model("simple_chat"),
                 messages=[
-                    {"role": "system", "content": "Выдели из сообщения пользователя только суть того, что нужно нарисовать. Убери обращения (дед, пожалуйста) и слова (нарисуй, сгенерируй). Верни ТОЛЬКО текст промпта на русском языке, без кавычек."},
+                    {"role": "system", "content": "Выдели из сообщения пользователя только суть того, что нужно нарисовать. Убери обращения и слова (нарисуй, сгенерируй). Верни ТОЛЬКО текст промпта, без кавычек."},
                     {"role": "user", "content": message.text}
                 ],
                 temperature=0.1
             )
             clean_prompt = extract_response.choices[0].message.content.strip()
-            
             logging.info(f"Генерация картинки по промпту: {clean_prompt}")
             
-            # 2. Отправляем запрос в Z Image Turbo
+            # 2. Генерация
             response = await client.images.generate(
                 model=get_model("image"),
                 prompt=clean_prompt,
@@ -140,34 +131,50 @@ async def handle_message(message: types.Message):
                 size="1024x1024"
             )
             
-            image_url = response.data[0].url
+            image_data = response.data[0]
             
-            # Отправляем картинку
-            await message.reply_photo(
-                photo=image_url, 
-                caption=f"Держи, что выпросил. Промпт: {clean_prompt}"
-            )
+            # 3. Скачиваем картинку или декодируем Base64
+            photo_to_send = None
+            
+            if image_data.url:
+                # Если API вернул ссылку, качаем её сами
+                logging.info(f"Скачиваю картинку по ссылке: {image_data.url}")
+                async with httpx.AsyncClient() as http_client:
+                    img_response = await http_client.get(image_data.url)
+                    if img_response.status_code == 200:
+                        photo_to_send = BufferedInputFile(img_response.content, filename="image.jpg")
+            
+            elif image_data.b64_json:
+                # Если API вернул Base64 (закодированный текст)
+                logging.info("Декодирую картинку из Base64...")
+                img_bytes = base64.b64decode(image_data.b64_json)
+                photo_to_send = BufferedInputFile(img_bytes, filename="image.jpg")
+
+            # 4. Отправляем фото в Telegram
+            if photo_to_send:
+                await message.reply_photo(photo=photo_to_send, caption=f"Держи, сударь. Промпт: {clean_prompt}")
+            else:
+                await message.reply("Картинка сгенерировалась, но я не смог её скачать. Проверь логи.")
             
         except Exception as e:
             logging.error(f"Ошибка генерации картинки: {e}")
-            await message.reply("Тьфу! Кисти засохли, холст порвался. Не могу нарисовать.")
-        return # Выходим, чтобы бот не отвечал текстом на просьбу нарисовать
+            await message.reply("Тьфу! Кисти засохли. Проверь баланс или настройки API.")
+        return 
 
     # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА ---
+    if chat_type in ["group", "supergroup"]:
+        if not (is_triggered or is_reply_to_bot or is_news):
+            return
+
     if user_id not in user_histories:
         user_histories[user_id] = []
     
     if is_news:
         task = "news_analysis"
-        prompt_text = f"[Пользователь переслал новость/ссылку]: {message.text}\nВыскажи свое мнение по этому поводу."
-    elif is_triggered or is_reply_to_bot:
-        task = "smart_chat"
-        prompt_text = message.text
+        prompt_text = f"[Пользователь переслал новость/ссылку]: {message.text}\nВыскажи свое мнение."
     else:
-        task = "simple_chat"
+        task = "smart_chat" if (is_triggered or is_reply_to_bot) else "simple_chat"
         prompt_text = message.text
-
-    model_to_use = get_model(task)
 
     user_histories[user_id].append({"role": "user", "content": prompt_text})
     if len(user_histories[user_id]) > 10:
@@ -177,19 +184,18 @@ async def handle_message(message: types.Message):
 
     try:
         response = await client.chat.completions.create(
-            model=model_to_use,
+            model=get_model(task),
             messages=[{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[user_id],
             temperature=0.85
         )
         
         bot_reply = response.choices[0].message.content
         await message.answer(bot_reply)
-        
         user_histories[user_id].append({"role": "assistant", "content": bot_reply})
 
     except Exception as e:
         logging.error(f"Ошибка API: {e}")
-        await message.answer("Прошу прощения, мои старческие нейроны дали сбой. Повторите.")
+        await message.answer("Прошу прощения, нейроны дали сбой. Повторите.")
 
 if __name__ == "__main__":
     asyncio.run(dp.start_polling(bot, on_startup=lambda _: asyncio.create_task(background_chatter())))
