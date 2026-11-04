@@ -13,15 +13,18 @@ from openai import AsyncOpenAI
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
+# Получаем токены из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
 
+# Инициализация бота и клиента (добавлен timeout=30.0, чтобы бот не зависал)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 client = AsyncOpenAI(
     api_key=PLUSVIBE_API_KEY,
-    base_url="https://plusvibeapi.ru/v1"
+    base_url="https://plusvibeapi.ru/v1",
+    timeout=30.0 
 )
 
 # --- НАСТРОЙКИ МОДЕЛЕЙ ---
@@ -41,6 +44,7 @@ AUTO_CHATTER_CHANCE = 0.05
 AUTO_CHATTER_INTERVAL = 300
 MAX_CONTEXT_MESSAGES = 15
 
+# --- ПРОМПТЫ ---
 SYSTEM_PROMPT = (
     "Ты — Дед-пердед. По умолчанию ты — галантный, вежливый и мудрый интеллигент. "
     "Если к тебе обращаются вежливо, ты отвечаешь максимально куртуазно и с уважением. "
@@ -58,11 +62,12 @@ CODE_PROMPT = (
     "Если код хороший — похвали сквозь зубы. Если это просто вопрос 'умеешь ли ты кодить' — ответь с достоинством, что ты старый хакер."
 )
 
+# --- ТРИГГЕРЫ ---
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "draw"]
-# Триггеры для анализа кода (добавил "кодить" и другие синонимы)
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```"]
 
+# --- ПАМЯТЬ ---
 user_histories = {} 
 chat_contexts = {}  
 
@@ -71,6 +76,7 @@ async def cmd_start(message: types.Message):
     user_histories[message.from_user.id] = []
     await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его сюда, я поржу.")
 
+# --- ФОНОВАЯ ЗАДАЧА ---
 async def background_chatter():
     while True:
         await asyncio.sleep(AUTO_CHATTER_INTERVAL)
@@ -105,6 +111,7 @@ async def handle_message(message: types.Message):
     text_lower = message.text.lower()
     words = text_lower.split()
     
+    # Обновляем контекст чата
     if chat_id not in chat_contexts:
         chat_contexts[chat_id] = []
     
@@ -113,6 +120,7 @@ async def handle_message(message: types.Message):
     if len(chat_contexts[chat_id]) > MAX_CONTEXT_MESSAGES:
         chat_contexts[chat_id].pop(0)
 
+    # Проверяем триггеры
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
@@ -133,6 +141,7 @@ async def handle_message(message: types.Message):
             )
             clean_prompt = extract_response.choices[0].message.content.strip()
             
+            # Проверка на цензуру
             if "REFUSED" in clean_prompt.upper() or "не могу" in clean_prompt.lower() or "извините" in clean_prompt.lower() or "запрещ" in clean_prompt.lower():
                 await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость. Задайте нормальный промпт.")
                 return
@@ -179,11 +188,11 @@ async def handle_message(message: types.Message):
     if user_id not in user_histories:
         user_histories[user_id] = []
     
-    # ВЫБОР ЗАДАЧИ И ТЕКСТА ПРОМПТА (ИСПРАВЛЕНО)
+    # Выбор задачи
     if is_code_request:
         task = "code_review"
         active_prompt = CODE_PROMPT
-        prompt_text = message.text # <--- ТЕПЕРЬ ПЕРЕМЕННАЯ НА МЕСТЕ
+        prompt_text = message.text
         logging.info("Запуск анализа кода...")
     elif is_news:
         task = "news_analysis"
@@ -216,6 +225,7 @@ async def handle_message(message: types.Message):
         logging.error(f"Ошибка API: {e}")
         await message.answer("Прошу прощения, мои старческие нейроны дали сбой. Повторите.")
 
+# --- ТОЧКА ВХОДА ---
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     asyncio.create_task(background_chatter())
