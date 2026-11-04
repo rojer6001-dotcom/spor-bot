@@ -53,6 +53,10 @@ class ChatContext(Base):
 engine = create_async_engine("sqlite+aiosqlite:///bot_memory.db", echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
+# --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
+message_buffers = {} # Для склейки текста
+pending_files = {}   # Для файлов, ожидающих инструкций {user_id: text_content}
+
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 async def get_user_history(user_id: int) -> list:
     async with async_session() as session:
@@ -81,6 +85,15 @@ async def save_chat_message(chat_id: int, message_text: str):
         await session.commit()
 
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+async def keep_typing(chat_id: int):
+    """Фоновая задача: держит статус 'печатает...' активным"""
+    try:
+        while True:
+            await bot.send_chat_action(chat_id=chat_id, action="typing")
+            await asyncio.sleep(4) # Telegram сбрасывает статус через 5 сек
+    except asyncio.CancelledError:
+        pass # Задача отменена, все ок
+
 async def send_long_message(message: types.Message, text: str):
     max_length = 4000
     if len(text) <= max_length:
@@ -138,9 +151,7 @@ TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед"
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "if ", "for ", "print("]
 
-# --- МЕХАНИЗМ СКЛЕИВАНИЯ СООБЩЕНИЙ ---
-message_buffers = {} 
-
+# --- ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ (С БУФЕРИЗАЦИЕЙ) ---
 async def delayed_process(user_id: int):
     await asyncio.sleep(1.5) 
     data = message_buffers.pop(user_id, None)
@@ -179,7 +190,7 @@ async def process_aggregated_text(message: types.Message, text: str):
 
     # --- ЛОГИКА РИСОВАНИЯ ---
     if is_draw_request:
-        await bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        typing_task = asyncio.create_task(keep_typing(chat_id))
         try:
             extract_response = await client.chat.completions.create(
                 model=get_model("simple_chat"),
@@ -227,6 +238,8 @@ async def process_aggregated_text(message: types.Message, text: str):
                 await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость.")
             else:
                 await message.reply("Тьфу! Кисти засохли. Проверь баланс или настройки API.")
+        finally:
+            typing_task.cancel()
         return 
 
     # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА ---
@@ -253,7 +266,8 @@ async def process_aggregated_text(message: types.Message, text: str):
     
     safe_history = truncate_history(history[-6:], max_chars=3000) 
 
-    await bot.send_chat_action(chat_id=chat_id, action="typing")
+    # Запускаем "печатает..."
+    typing_task = asyncio.create_task(keep_typing(chat_id))
 
     try:
         response = await client.chat.completions.create(
@@ -269,8 +283,11 @@ async def process_aggregated_text(message: types.Message, text: str):
     except Exception as e:
         logging.error(f"Ошибка API: {e}")
         await message.reply("Прошу прощения, сударь. Видимо, текст настолько огромен, что мои старческие нейроны не выдержали.")
+    finally:
+        # Останавливаем "печатает..." в любом случае (успех или ошибка)
+        typing_task.cancel()
 
-# --- ОБРАБОТЧИК ФАЙЛОВ (ИСПРАВЛЕНА КОДИРОВКА) ---
+# --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
@@ -287,16 +304,12 @@ async def handle_document(message: types.Message):
         await message.reply(f"Это что за дичь? Я понимаю только код и текст. Расширения: {', '.join(allowed_extensions)}")
         return
 
-    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
-    
+    typing_task = asyncio.create_task(keep_typing(message.chat.id))
     try:
         file = await bot.get_file(document.file_id)
         downloaded_file = await bot.download_file(file.file_path)
-        
-        # Читаем байты
         file_bytes = downloaded_file.read()
         
-        # Пытаемся декодировать текст в разных кодировках
         code_text = None
         for enc in ['utf-8', 'cp1251', 'koi8-r', 'utf-16']:
             try:
@@ -309,16 +322,22 @@ async def handle_document(message: types.Message):
             await message.reply("Файл не читается. Убедись, что это обычный текст в кодировке UTF-8 или Windows-1251.")
             return
         
-        # --- ПРОВЕРКА ЛИМИТА ФАЙЛА (ЭКОНОМИЯ ТОКЕНОВ) ---
         if len(code_text) > MAX_FILE_LENGTH:
             await message.reply(f"Слышь, щегол! В файле {len(code_text)} символов. А мой старческий мозг может переварить максимум {MAX_FILE_LENGTH}. Разбей файл на части и пришли по очереди.")
             return
         
-        logging.info(f"Получен файл {document.file_name} ({len(code_text)} символов). Запуск анализа...")
+        # --- НОВАЯ ЛОГИКА: ЧТО ДЕЛАТЬ С ФАЙЛОМ? ---
+        if not message.caption:
+            # Если нет описания, сохраняем файл и ждем инструкций
+            pending_files[user_id] = {"text": code_text, "filename": document.file_name}
+            await message.reply("Файл получил. А что с ним делать? Напиши задачу (например: 'найди ошибки', 'сделай ревью', 'объясни, что тут происходит').")
+            return
         
-        prompt_text = f"Пользователь прислал файл '{document.file_name}'. Вот его содержимое:\n\n{code_text}\n\nСделай полное ревью этого кода. Укажи на ошибки и стиль."
+        # Если описание есть, берем его как инструкцию
+        prompt_text = f"Пользователь прислал файл '{document.file_name}' и задачу: '{message.caption}'.\n\nВот содержимое файла:\n\n{code_text}"
         
-        await save_user_message(user_id, "user", f"[Файл: {document.file_name}, размер: {len(code_text)} символов]")
+        logging.info(f"Получен файл {document.file_name} ({len(code_text)} символов) с задачей: {message.caption}. Запуск анализа...")
+        await save_user_message(user_id, "user", f"[Файл: {document.file_name}] Задача: {message.caption}")
         
         response = await client.chat.completions.create(
             model=get_model("code_review"),
@@ -336,6 +355,8 @@ async def handle_document(message: types.Message):
     except Exception as e:
         logging.error(f"ОШИБКА ПРИ АНАЛИЗЕ ФАЙЛА: {e}")
         await message.reply(f"Тьфу! Ошибка при анализе файла. Смотри логи на BotHost.")
+    finally:
+        typing_task.cancel()
 
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
@@ -351,7 +372,38 @@ async def handle_message(message: types.Message):
     
     if message.text.startswith('/'):
         return
+    
+    # --- НОВАЯ ЛОГИКА: ЕСЛИ ЕСТЬ ФАЙЛ, ОЖИДАЮЩИЙ ИНСТРУКЦИЙ ---
+    if user_id in pending_files:
+        file_data = pending_files.pop(user_id)
+        code_text = file_data["text"]
+        filename = file_data["filename"]
+        instruction = message.text
         
+        typing_task = asyncio.create_task(keep_typing(message.chat.id))
+        try:
+            prompt_text = f"Пользователь прислал файл '{filename}' и задачу: '{instruction}'.\n\nВот содержимое файла:\n\n{code_text}"
+            await save_user_message(user_id, "user", f"[Файл: {filename}] Задача: {instruction}")
+            
+            response = await client.chat.completions.create(
+                model=get_model("code_review"),
+                messages=[
+                    {"role": "system", "content": CODE_PROMPT},
+                    {"role": "user", "content": prompt_text}
+                ],
+                temperature=0.8
+            )
+            bot_reply = response.choices[0].message.content
+            await send_long_message(message, bot_reply)
+            await save_user_message(user_id, "assistant", bot_reply)
+        except Exception as e:
+            logging.error(f"ОШИБКА ПРИ АНАЛИЗЕ ФАЙЛА ПО ИНСТРУКЦИИ: {e}")
+            await message.reply("Тьфу! Не смог обработать файл по твоей указке. Ошибка в логах.")
+        finally:
+            typing_task.cancel()
+        return # Прерываем дальнейшую обработку текста, так как это была инструкция к файлу
+
+    # --- СТАНДАРТНАЯ БУФЕРИЗАЦИЯ ТЕКСТА ---
     if user_id in message_buffers:
         message_buffers[user_id]["text"] += "\n" + message.text
         if message_buffers[user_id]["task"]:
