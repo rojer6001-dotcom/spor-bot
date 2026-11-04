@@ -27,8 +27,12 @@ dp = Dispatcher()
 client = AsyncOpenAI(
     api_key=PLUSVIBE_API_KEY,
     base_url="https://plusvibeapi.ru/v1",
-    timeout=120.0 # Увеличили таймаут для анализа больших файлов
+    timeout=120.0 
 )
+
+# --- ЛИМИТЫ НА ВХОДЯЩИЕ ДАННЫЕ ---
+MAX_TEXT_LENGTH = 15000  # Максимум символов для текстового сообщения
+MAX_FILE_LENGTH = 60000  # Максимум символов для присланного файла
 
 # --- НАСТРОЙКИ БАЗЫ ДАННЫХ (SQLite) ---
 Base = declarative_base()
@@ -75,6 +79,27 @@ async def save_chat_message(chat_id: int, message_text: str):
     async with async_session() as session:
         session.add(ChatContext(chat_id=chat_id, message_text=message_text))
         await session.commit()
+
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+async def send_long_message(message: types.Message, text: str):
+    max_length = 4000
+    if len(text) <= max_length:
+        await message.reply(text)
+        return
+    
+    for i in range(0, len(text), max_length):
+        chunk = text[i:i+max_length]
+        await message.reply(chunk)
+        await asyncio.sleep(0.5)
+
+def truncate_history(history: list, max_chars: int = 4000) -> list:
+    truncated = []
+    for msg in history:
+        content = msg["content"]
+        if len(content) > max_chars:
+            content = content[:max_chars] + "\n... [ТЕКСТ ОБРЕЗАН] ..."
+        truncated.append({"role": msg["role"], "content": content})
+    return truncated
 
 # --- НАСТРОЙКИ МОДЕЛЕЙ И ПРОМПТЫ ---
 MODELS = {
@@ -136,10 +161,15 @@ async def process_aggregated_text(message: types.Message, text: str):
     chat_id = message.chat.id
     chat_type = message.chat.type
     
+    # --- ПРОВЕРКА ЛИМИТА ТЕКСТА (ЭКОНОМИЯ ТОКЕНОВ) ---
+    if len(text) > MAX_TEXT_LENGTH:
+        await message.reply(f"Слышь, щегол! Ты прислал {len(text)} символов. А мой старческий мозг может переварить максимум {MAX_TEXT_LENGTH}. Сократи текст или пришли его файлом!")
+        return
+    
     text_lower = text.lower()
     words = text_lower.split()
     
-    await save_chat_message(chat_id, f"{message.from_user.first_name or 'Кто-то'}: {text}")
+    await save_chat_message(chat_id, f"{message.from_user.first_name or 'Кто-то'}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
@@ -200,7 +230,7 @@ async def process_aggregated_text(message: types.Message, text: str):
                 await message.reply("Тьфу! Кисти засохли. Проверь баланс или настройки API.")
         return 
 
-    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА И АНАЛИЗА КОДА ---
+    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА ---
     if chat_type in ["group", "supergroup"]:
         if not (is_triggered or is_reply_to_bot or is_news or is_code_request):
             return
@@ -221,84 +251,85 @@ async def process_aggregated_text(message: types.Message, text: str):
 
     await save_user_message(user_id, "user", text)
     history.append({"role": "user", "content": text})
-    history = history[-10:]
+    
+    safe_history = truncate_history(history[-6:], max_chars=3000) 
 
     await bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
         response = await client.chat.completions.create(
             model=get_model(task),
-            messages=[{"role": "system", "content": active_prompt}] + history,
+            messages=[{"role": "system", "content": active_prompt}] + safe_history,
             temperature=0.85
         )
         
         bot_reply = response.choices[0].message.content
-        await message.answer(bot_reply)
+        await send_long_message(message, bot_reply)
         await save_user_message(user_id, "assistant", bot_reply)
 
     except Exception as e:
         logging.error(f"Ошибка API: {e}")
-        await message.answer("Прошу прощения, сударь. Видимо, ваш код настолько огромен, что мои нейроны не выдержали. Попробуйте прислать файлом.")
+        await message.reply("Прошу прощения, сударь. Видимо, текст настолько огромен, что мои старческие нейроны не выдержали.")
 
-# --- ОБРАБОТЧИК ФАЙЛОВ (НОВОЕ!) ---
+# --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
-    chat_id = message.chat.id
     document = message.document
     
-    # Проверяем размер файла (не более 1 МБ для безопасности)
     if document.file_size > 1024 * 1024:
-        await message.reply("Слышь, щегол, файл-то огромный! Куда мне столько? Пришли кусок поменьше.")
+        await message.reply("Слышь, щегол, файл-то огромный (больше 1 МБ)! Куда мне столько? Пришли кусок поменьше.")
         return
 
-    # Проверяем расширение
-    allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.cpp', '.c', '.java']
+    allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.cpp', '.c', '.java', '.go', '.rs', '.php']
     file_ext = os.path.splitext(document.file_name)[1].lower()
     
     if file_ext not in allowed_extensions:
         await message.reply(f"Это что за дичь? Я понимаю только код и текст. Расширения: {', '.join(allowed_extensions)}")
         return
 
-    await bot.send_chat_action(chat_id=chat_id, action="typing")
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     
     try:
-        # Скачиваем файл
         file = await bot.get_file(document.file_id)
         downloaded_file = await bot.download_file(file.file_path)
         
-        # Читаем как текст
         code_text = downloaded_file.read().decode('utf-8')
         
-        # Отправляем на анализ
+        # --- ПРОВЕРКА ЛИМИТА ФАЙЛА (ЭКОНОМИЯ ТОКЕНОВ) ---
+        if len(code_text) > MAX_FILE_LENGTH:
+            await message.reply(f"Слышь, щегол! В файле {len(code_text)} символов. А мой старческий мозг может переварить максимум {MAX_FILE_LENGTH}. Разбей файл на части и пришли по очереди.")
+            return
+        
         logging.info(f"Получен файл {document.file_name} ({len(code_text)} символов). Запуск анализа...")
         
-        history = await get_user_history(user_id)
         prompt_text = f"Пользователь прислал файл '{document.file_name}'. Вот его содержимое:\n\n{code_text}\n\nСделай полное ревью этого кода. Укажи на ошибки и стиль."
         
-        await save_user_message(user_id, "user", f"[Файл: {document.file_name}]")
-        history.append({"role": "user", "content": prompt_text})
+        await save_user_message(user_id, "user", f"[Файл: {document.file_name}, размер: {len(code_text)} символов]")
         
         response = await client.chat.completions.create(
             model=get_model("code_review"),
-            messages=[{"role": "system", "content": CODE_PROMPT}] + history[-3:], # Берем только последние 3 сообщения + файл, чтобы не превысить контекст
+            messages=[
+                {"role": "system", "content": CODE_PROMPT},
+                {"role": "user", "content": prompt_text}
+            ],
             temperature=0.8
         )
         
         bot_reply = response.choices[0].message.content
-        await message.reply(bot_reply)
+        await send_long_message(message, bot_reply)
         await save_user_message(user_id, "assistant", bot_reply)
 
     except UnicodeDecodeError:
         await message.reply("Файл не читается. Убедись, что это обычный текст в кодировке UTF-8, а не какая-то бинарная мерзость.")
     except Exception as e:
-        logging.error(f"Ошибка при чтении файла: {e}")
-        await message.reply("Тьфу! Не смог прочитать твой файл. Может, он битый?")
+        logging.error(f"ОШИБКА ПРИ АНАЛИЗЕ ФАЙЛА: {e}")
+        await message.reply(f"Тьфу! Ошибка при анализе файла. Детали в логах.")
 
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его текстом или присылай файлом (.py, .txt и т.д.).")
+    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его текстом (до 15 тыс. символов) или присылай файлом (до 60 тыс. символов).")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
