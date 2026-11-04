@@ -5,7 +5,7 @@ import asyncio
 import base64
 import httpx
 from difflib import get_close_matches
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from openai import AsyncOpenAI
@@ -27,7 +27,7 @@ dp = Dispatcher()
 client = AsyncOpenAI(
     api_key=PLUSVIBE_API_KEY,
     base_url="https://plusvibeapi.ru/v1",
-    timeout=60.0 # Увеличили таймаут, так как склеенный код может обрабатываться дольше
+    timeout=120.0 # Увеличили таймаут для анализа больших файлов
 )
 
 # --- НАСТРОЙКИ БАЗЫ ДАННЫХ (SQLite) ---
@@ -106,18 +106,17 @@ CODE_PROMPT = (
     "Твоя задача — проанализировать код, ошибку или технический вопрос. "
     "Найди баги, укажи на плохой стиль, объясни, почему код не работает. "
     "Ты можешь быть токсичным и грубым (использовать мат), но твои технические советы должны быть точными. "
-    "Если код хороший — похвали сквозь зубы."
+    "Если код хороший — похвали сквозь зубы. Если это вопрос 'умеешь ли ты кодить' — ответь с достоинством, что ты старый хакер."
 )
 
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
-DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "draw"]
-CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```"]
+DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази"] 
+CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "if ", "for ", "print("]
 
 # --- МЕХАНИЗМ СКЛЕИВАНИЯ СООБЩЕНИЙ ---
-message_buffers = {} # user_id: {"text": str, "message": types.Message, "task": asyncio.Task}
+message_buffers = {} 
 
 async def delayed_process(user_id: int):
-    # Ждем 1.5 секунды, чтобы Телега успела прислать все куски
     await asyncio.sleep(1.5) 
     data = message_buffers.pop(user_id, None)
     if not data:
@@ -156,17 +155,18 @@ async def process_aggregated_text(message: types.Message, text: str):
             extract_response = await client.chat.completions.create(
                 model=get_model("simple_chat"),
                 messages=[
-                    {"role": "system", "content": "Выдели из сообщения пользователя только суть того, что нужно нарисовать. Убери обращения и слова (нарисуй, сгенерируй). Верни ТОЛЬКО текст промпта, без кавычек. Если запрос нарушает правила безопасности, верни ровно одно слово: REFUSED."},
+                    {"role": "system", "content": "Выдели из сообщения пользователя только суть того, что нужно нарисовать (например: 'кот в космосе'). Убери обращения. Верни ТОЛЬКО текст промпта. Если в сообщении нет явного визуального запроса (например, это код или вопрос), верни ровно одно слово: REFUSED."},
                     {"role": "user", "content": text}
                 ],
                 temperature=0.1
             )
             clean_prompt = extract_response.choices[0].message.content.strip()
             
-            if "REFUSED" in clean_prompt.upper() or "не могу" in clean_prompt.lower() or "извините" in clean_prompt.lower() or "запрещ" in clean_prompt.lower():
-                await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость.")
+            if "REFUSED" in clean_prompt.upper() or "нет запроса" in clean_prompt.lower() or len(clean_prompt) > 100:
+                await message.reply("А не пошли бы вы, сударь! Тут и рисовать-то нечего. Или цензура не пропустит.")
                 return
 
+            logging.info(f"Генерация картинки по промпту: {clean_prompt}")
             response = await client.images.generate(
                 model=get_model("image"),
                 prompt=clean_prompt,
@@ -210,7 +210,7 @@ async def process_aggregated_text(message: types.Message, text: str):
     if is_code_request:
         task = "code_review"
         active_prompt = CODE_PROMPT
-        logging.info(f"Запуск анализа кода (длина {len(text)} символов)...")
+        logging.info(f"Запуск анализа кода...")
     elif is_news:
         task = "news_analysis"
         active_prompt = SYSTEM_PROMPT
@@ -238,35 +238,85 @@ async def process_aggregated_text(message: types.Message, text: str):
 
     except Exception as e:
         logging.error(f"Ошибка API: {e}")
-        await message.answer("Прошу прощения, сударь. Видимо, текст настолько огромен, что мои старческие нейросети не выдержали. Попробуйте прислать файлом.")
+        await message.answer("Прошу прощения, сударь. Видимо, ваш код настолько огромен, что мои нейроны не выдержали. Попробуйте прислать файлом.")
 
-# --- ОБРАБОТЧИКИ ---
+# --- ОБРАБОТЧИК ФАЙЛОВ (НОВОЕ!) ---
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    document = message.document
+    
+    # Проверяем размер файла (не более 1 МБ для безопасности)
+    if document.file_size > 1024 * 1024:
+        await message.reply("Слышь, щегол, файл-то огромный! Куда мне столько? Пришли кусок поменьше.")
+        return
+
+    # Проверяем расширение
+    allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.cpp', '.c', '.java']
+    file_ext = os.path.splitext(document.file_name)[1].lower()
+    
+    if file_ext not in allowed_extensions:
+        await message.reply(f"Это что за дичь? Я понимаю только код и текст. Расширения: {', '.join(allowed_extensions)}")
+        return
+
+    await bot.send_chat_action(chat_id=chat_id, action="typing")
+    
+    try:
+        # Скачиваем файл
+        file = await bot.get_file(document.file_id)
+        downloaded_file = await bot.download_file(file.file_path)
+        
+        # Читаем как текст
+        code_text = downloaded_file.read().decode('utf-8')
+        
+        # Отправляем на анализ
+        logging.info(f"Получен файл {document.file_name} ({len(code_text)} символов). Запуск анализа...")
+        
+        history = await get_user_history(user_id)
+        prompt_text = f"Пользователь прислал файл '{document.file_name}'. Вот его содержимое:\n\n{code_text}\n\nСделай полное ревью этого кода. Укажи на ошибки и стиль."
+        
+        await save_user_message(user_id, "user", f"[Файл: {document.file_name}]")
+        history.append({"role": "user", "content": prompt_text})
+        
+        response = await client.chat.completions.create(
+            model=get_model("code_review"),
+            messages=[{"role": "system", "content": CODE_PROMPT}] + history[-3:], # Берем только последние 3 сообщения + файл, чтобы не превысить контекст
+            temperature=0.8
+        )
+        
+        bot_reply = response.choices[0].message.content
+        await message.reply(bot_reply)
+        await save_user_message(user_id, "assistant", bot_reply)
+
+    except UnicodeDecodeError:
+        await message.reply("Файл не читается. Убедись, что это обычный текст в кодировке UTF-8, а не какая-то бинарная мерзость.")
+    except Exception as e:
+        logging.error(f"Ошибка при чтении файла: {e}")
+        await message.reply("Тьфу! Не смог прочитать твой файл. Может, он битый?")
+
+# --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его сюда, я поржу.")
+    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его текстом или присылай файлом (.py, .txt и т.д.).")
 
-@dp.message()
+@dp.message(F.text)
 async def handle_message(message: types.Message):
     if not message.text:
         return
         
     user_id = message.from_user.id
     
-    # Игнорируем команды, чтобы не буферизировать их
     if message.text.startswith('/'):
         return
         
-    # Добавляем текст в буфер
     if user_id in message_buffers:
         message_buffers[user_id]["text"] += "\n" + message.text
-        # Отменяем старый таймер, так как пришло новое сообщение
         if message_buffers[user_id]["task"]:
             message_buffers[user_id]["task"].cancel()
     else:
-        # Если буфера нет, создаем новый. Сохраняем самое первое сообщение для ответа
         message_buffers[user_id] = {"text": message.text, "message": message}
         
-    # Запускаем новый таймер
     task = asyncio.create_task(delayed_process(user_id))
     message_buffers[user_id]["task"] = task
 
