@@ -29,6 +29,7 @@ MODELS = {
     "simple_chat": "deepseek-v4.1-flash",
     "smart_chat": "gpt-6.1-sol",
     "news_analysis": "gpt-6.1-sol",
+    "code_review": "gpt-6.1-sol", # Для кода лучше использовать умную модель
     "background": "claude-haiku-5.5",
     "image": "z-image-turbo"
 }
@@ -49,8 +50,18 @@ SYSTEM_PROMPT = (
     "Отвечай коротко (1-3 предложения)."
 )
 
+CODE_PROMPT = (
+    "Ты — Дед-пердед, но сейчас ты выступаешь в роли опытного, циничного и ворчливого Senior-разработчика. "
+    "Твоя задача — проанализировать код или ошибку, которую прислал пользователь. "
+    "Найди баги, укажи на плохой стиль, объясни, почему код не работает (если это ошибка), и дай рекомендации по исправлению. "
+    "Ты можешь быть токсичным и грубым (использовать мат), если пользователь написал полную чушь, но твои технические советы должны быть точными и полезными. "
+    "Если код хороший — похвали сквозь зубы, чтобы не зазнавался."
+)
+
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "draw"]
+# Триггеры для анализа кода
+CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "def ", "import ", "```"]
 
 user_histories = {} 
 chat_contexts = {}  
@@ -58,7 +69,7 @@ chat_contexts = {}
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_histories[message.from_user.id] = []
-    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.")
+    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его сюда, я поржу.")
 
 async def background_chatter():
     while True:
@@ -106,15 +117,14 @@ async def handle_message(message: types.Message):
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
     is_news = message.forward_from_chat or message.forward_from or "http" in text_lower 
+    
+    # Проверяем, похоже ли это на код или запрос о помощи с кодом
+    is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in message.text
 
     # --- ЛОГИКА РИСОВАНИЯ ---
     if is_draw_request:
-        if chat_type in ["group", "supergroup"] and not (is_triggered or is_reply_to_bot):
-            return
-
         await bot.send_chat_action(chat_id=chat_id, action="upload_photo")
         try:
-            # 1. Выделяем чистый промпт
             extract_response = await client.chat.completions.create(
                 model=get_model("simple_chat"),
                 messages=[
@@ -125,14 +135,11 @@ async def handle_message(message: types.Message):
             )
             clean_prompt = extract_response.choices[0].message.content.strip()
             
-            # ПРОВЕРКА: Если текстовая модель отказалась, не шлем это художнику
-            if "REFUSED" in clean_prompt or "не могу" in clean_prompt.lower() or "извините" in clean_prompt.lower():
+            if "REFUSED" in clean_prompt.upper() or "не могу" in clean_prompt.lower() or "извините" in clean_prompt.lower() or "запрещ" in clean_prompt.lower():
                 await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость. Задайте нормальный промпт.")
                 return
 
             logging.info(f"Генерация картинки по промпту: {clean_prompt}")
-            
-            # 2. Генерация
             response = await client.images.generate(
                 model=get_model("image"),
                 prompt=clean_prompt,
@@ -143,46 +150,54 @@ async def handle_message(message: types.Message):
             image_data = response.data[0]
             photo_to_send = None
             
-            # 3. Скачиваем или декодируем
             if image_data.url:
-                logging.info(f"Скачиваю картинку по ссылке: {image_data.url}")
                 async with httpx.AsyncClient() as http_client:
                     img_response = await http_client.get(image_data.url)
                     if img_response.status_code == 200:
                         photo_to_send = BufferedInputFile(img_response.content, filename="image.jpg")
             elif image_data.b64_json:
-                logging.info("Декодирую картинку из Base64...")
                 img_bytes = base64.b64decode(image_data.b64_json)
                 photo_to_send = BufferedInputFile(img_bytes, filename="image.jpg")
 
             if photo_to_send:
                 await message.reply_photo(photo=photo_to_send, caption=f"Держи, сударь. Промпт: {clean_prompt}")
             else:
-                await message.reply("Картинка сгенерировалась, но я не смог её скачать.")
+                await message.reply("Картинка сгенерировалась, но я не смог её скачать. Наверное, интернет барахлит.")
             
         except Exception as e:
             error_text = str(e).lower()
             logging.error(f"Ошибка генерации картинки: {e}")
-            
             if "content" in error_text or "policy" in error_text or "400" in error_text or "safety" in error_text or "invalid" in error_text:
                 await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость. Задайте нормальный промпт.")
             else:
-                await message.reply(f"Тьфу! Кисти засохли. Ошибка: {e}") # Выводим ошибку для отладки
+                await message.reply("Тьфу! Кисти засохли, холст порвался. Проверь баланс или настройки API, а меня не трогай.")
         return 
 
-    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА ---
+    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА И АНАЛИЗА КОДА ---
     if chat_type in ["group", "supergroup"]:
-        if not (is_triggered or is_reply_to_bot or is_news):
+        # В группах отвечаем, если позвали, ответили реплаем, прислали новость или КОД
+        if not (is_triggered or is_reply_to_bot or is_news or is_code_request):
             return
 
     if user_id not in user_histories:
         user_histories[user_id] = []
     
-    if is_news:
+    # Выбираем задачу и промпт
+    if is_code_request:
+        task = "code_review"
+        active_prompt = CODE_PROMPT
+        logging.info("Запуск анализа кода...")
+    elif is_news:
         task = "news_analysis"
+        active_prompt = SYSTEM_PROMPT
         prompt_text = f"[Пользователь переслал новость/ссылку]: {message.text}\nВыскажи свое мнение по этому поводу."
     else:
         task = "smart_chat" if (is_triggered or is_reply_to_bot) else "simple_chat"
+        active_prompt = SYSTEM_PROMPT
+        prompt_text = message.text
+
+    # Если это не код, используем обычный текст
+    if not is_code_request:
         prompt_text = message.text
 
     user_histories[user_id].append({"role": "user", "content": prompt_text})
@@ -194,7 +209,7 @@ async def handle_message(message: types.Message):
     try:
         response = await client.chat.completions.create(
             model=get_model(task),
-            messages=[{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[user_id],
+            messages=[{"role": "system", "content": active_prompt}] + user_histories[user_id],
             temperature=0.85
         )
         
