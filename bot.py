@@ -20,19 +20,18 @@ client = AsyncOpenAI(
     base_url="https://plusvibeapi.ru/v1"
 )
 
-# --- НАСТРОЙКИ МОДЕЛЕЙ ПОД ЗАДАЧИ ---
+# --- НАСТРОЙКИ МОДЕЛЕЙ ---
 MODELS = {
-    "simple_chat": "deepseek-v4.1-flash",  # Самая дешевая и быстрая (для болтовни)
-    "smart_chat": "gpt-6.1-sol",           # Умная (для споров, триггеров)
-    "news_analysis": "gpt-6.1-sol",        # Для анализа ссылок и новостей
-    "background": "claude-haiku-5.5"       # Средняя (для фонового чтения чата)
+    "simple_chat": "deepseek-v4.1-flash",
+    "smart_chat": "gpt-6.1-sol",
+    "news_analysis": "gpt-6.1-sol",
+    "background": "claude-haiku-5.5",
+    "image": "z-image-turbo"
 }
 
 def get_model(task_type: str) -> str:
-    """Возвращает название модели в зависимости от задачи"""
-    return MODELS.get(task_type, "claude-haiku-5.5") # По умолчанию haiku
+    return MODELS.get(task_type, "claude-haiku-5.5")
 
-# --- НАСТРОЙКИ АВТОНОМНОСТИ ---
 AUTO_CHATTER_CHANCE = 0.05
 AUTO_CHATTER_INTERVAL = 300
 MAX_CONTEXT_MESSAGES = 15
@@ -48,6 +47,7 @@ SYSTEM_PROMPT = (
 )
 
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
+DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "draw"]
 
 user_histories = {} 
 chat_contexts = {}  
@@ -55,9 +55,7 @@ chat_contexts = {}
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     user_histories[message.from_user.id] = []
-    # Тут используем дешевую модель для приветствия
-    model = get_model("simple_chat")
-    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?")
+    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.")
 
 async def background_chatter():
     while True:
@@ -65,9 +63,7 @@ async def background_chatter():
         for chat_id, context in list(chat_contexts.items()):
             if len(context) >= 3 and random.random() < AUTO_CHATTER_CHANCE:
                 try:
-                    # Для фоновых задач используем дешевую/среднюю модель, чтобы не разориться
                     model = get_model("background")
-                    
                     response = await client.chat.completions.create(
                         model=model,
                         messages=[
@@ -105,15 +101,62 @@ async def handle_message(message: types.Message):
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
     is_news = message.forward_from_chat or message.forward_from or "http" in text_lower 
+    
+    # Проверяем, просят ли нарисовать
+    is_draw_request = any(word in text_lower for word in DRAW_TRIGGERS)
 
+    # Если это группа, проверяем, обращаются ли к боту
     if chat_type in ["group", "supergroup"]:
-        if not (is_triggered or is_reply_to_bot or is_news):
+        if not (is_triggered or is_reply_to_bot or is_news or is_draw_request):
             return
 
+    # --- ЛОГИКА РИСОВАНИЯ ---
+    if is_draw_request:
+        # В группах рисуем только если позвали по имени или ответили реплаем
+        if chat_type in ["group", "supergroup"] and not (is_triggered or is_reply_to_bot):
+            return
+            
+        await bot.send_chat_action(chat_id=chat_id, action="upload_photo")
+        
+        try:
+            # 1. Выделяем чистый промпт из сообщения с помощью дешевой модели
+            extract_response = await client.chat.completions.create(
+                model=get_model("simple_chat"),
+                messages=[
+                    {"role": "system", "content": "Выдели из сообщения пользователя только суть того, что нужно нарисовать. Убери обращения (дед, пожалуйста) и слова (нарисуй, сгенерируй). Верни ТОЛЬКО текст промпта на русском языке, без кавычек."},
+                    {"role": "user", "content": message.text}
+                ],
+                temperature=0.1
+            )
+            clean_prompt = extract_response.choices[0].message.content.strip()
+            
+            logging.info(f"Генерация картинки по промпту: {clean_prompt}")
+            
+            # 2. Отправляем запрос в Z Image Turbo
+            response = await client.images.generate(
+                model=get_model("image"),
+                prompt=clean_prompt,
+                n=1,
+                size="1024x1024"
+            )
+            
+            image_url = response.data[0].url
+            
+            # Отправляем картинку
+            await message.reply_photo(
+                photo=image_url, 
+                caption=f"Держи, что выпросил. Промпт: {clean_prompt}"
+            )
+            
+        except Exception as e:
+            logging.error(f"Ошибка генерации картинки: {e}")
+            await message.reply("Тьфу! Кисти засохли, холст порвался. Не могу нарисовать.")
+        return # Выходим, чтобы бот не отвечал текстом на просьбу нарисовать
+
+    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА ---
     if user_id not in user_histories:
         user_histories[user_id] = []
     
-    # --- ВЫБОР МОДЕЛИ ПОД ЗАДАЧУ ---
     if is_news:
         task = "news_analysis"
         prompt_text = f"[Пользователь переслал новость/ссылку]: {message.text}\nВыскажи свое мнение по этому поводу."
@@ -125,7 +168,6 @@ async def handle_message(message: types.Message):
         prompt_text = message.text
 
     model_to_use = get_model(task)
-    logging.info(f"Использую модель {model_to_use} для задачи {task}")
 
     user_histories[user_id].append({"role": "user", "content": prompt_text})
     if len(user_histories[user_id]) > 10:
@@ -135,7 +177,7 @@ async def handle_message(message: types.Message):
 
     try:
         response = await client.chat.completions.create(
-            model=model_to_use, # <--- Подставляем нужную модель
+            model=model_to_use,
             messages=[{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[user_id],
             temperature=0.85
         )
