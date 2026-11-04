@@ -1,3 +1,5 @@
 aiogram
 openai
 httpx
+sqlalchemy[asyncio]
+aiosqlite
