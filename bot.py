@@ -55,7 +55,7 @@ async def handle_message(message: types.Message):
     try:
         # Запрос к PlusVibe API
         response = await client.chat.completions.create(
-            model="gpt-6-luna", # Или другая модель
+            model="claude-haiku-5.5", # Или другая модель
             messages=[{"role": "system", "content": SYSTEM_PROMPT}] + user_histories[user_id],
             temperature=0.8 # Чуть больше креатива и дерзости
         )
