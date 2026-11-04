@@ -21,7 +21,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") # НОВОЕ
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 if not BOT_TOKEN or not PLUSVIBE_API_KEY:
@@ -276,8 +276,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_news = is_forwarded or "http" in text_lower 
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not is_code_request
-    
-    # Проверка на политический анализ (не срабатывает, если это код)
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS) and not is_code_request
     
     is_group = message.chat.type in ["group", "supergroup"]
@@ -349,47 +347,47 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return 
 
-        # --- 2. АНАЛИЗ КОДА / ПОЛИТИКА / ТЕКСТ ---
+        # --- 2. ПОДГОТОВКА ТЕКСТА (КОД, ПОЛИТИКА ИЛИ ЧАТ) ---
         history = await get_user_history(chat_id, user_id)
         
-        if is_code_request:
-            task = "code_review"
-            active_prompt = CODE_PROMPT
-            text = f"Проанализируй этот код или ошибку:\n\n{text}"
-            
-        elif is_political_request:
-            # Ищем пруфы в интернете
-            task = "news_analysis"
-            active_prompt = DEBATE_PROMPT
-            
-            typing_task = asyncio.create_task(keep_typing(chat_id))
-            search_results = await search_tavily(text)
-            typing_task.cancel() # Убираем "печатает" пока формируем запрос
-            
-            text = (
-                f"Пользователь просит проанализировать политическую тему: \"{text}\"\n\n"
-                f"Вот найденные релевантные источники и выдержки из них:\n"
-                f"---\n{search_results}\n---\n"
-                f"На основе этих источников и своих знаний проведи сбалансированный анализ темы, "
-                f"следуя своей роли. Укажи на ошибки обеих сторон и приведи пруфы."
-            )
-            
-        elif is_news:
-            task = "news_analysis"
-            active_prompt = DEBATE_PROMPT # Новости тоже анализируем нейтрально
-            text = f"[Пользователь переслал новость/ссылку]: {text}\nВыскажи свое мнение, опираясь на факты."
-        else:
-            task = "smart_chat" if (is_triggered or is_reply_to_bot) else "simple_chat"
-            active_prompt = SYSTEM_PROMPT
-
-        await save_user_message(chat_id, user_id, "user", text)
-        
-        safe_history = truncate_history(history[-4:], max_chars=2000) # -4, т.к. -1 это текущий
-        safe_history.append({"role": "user", "content": text})
-
+        # Запускаем "печатает..." один раз для всех текстовых веток
         typing_task = asyncio.create_task(keep_typing(chat_id))
-
+        
         try:
+            if is_code_request:
+                task = "code_review"
+                active_prompt = CODE_PROMPT
+                final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
+                
+            elif is_political_request:
+                task = "news_analysis"
+                active_prompt = DEBATE_PROMPT
+                
+                # Поиск в Tavily (статус "печатает..." продолжает гореть)
+                search_results = await search_tavily(text)
+                
+                final_text = (
+                    f"Пользователь просит проанализировать политическую тему: \"{text}\"\n\n"
+                    f"Вот найденные релевантные источники и выдержки из них:\n"
+                    f"---\n{search_results}\n---\n"
+                    f"На основе этих источников и своих знаний проведи сбалансированный анализ темы, "
+                    f"следуя своей роли. Укажи на ошибки обеих сторон и приведи пруфы."
+                )
+                
+            elif is_news:
+                task = "news_analysis"
+                active_prompt = DEBATE_PROMPT 
+                final_text = f"[Пользователь переслал новость/ссылку]: {text}\nВыскажи свое мнение, опираясь на факты."
+            else:
+                task = "smart_chat" if (is_triggered or is_reply_to_bot) else "simple_chat"
+                active_prompt = SYSTEM_PROMPT
+                final_text = text
+
+            await save_user_message(chat_id, user_id, "user", final_text)
+            
+            safe_history = truncate_history(history[-4:], max_chars=2000) 
+            safe_history.append({"role": "user", "content": final_text})
+
             async with api_semaphore:
                 response = await client.chat.completions.create(
                     model=get_model(task),
