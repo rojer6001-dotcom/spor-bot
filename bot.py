@@ -31,8 +31,8 @@ client = AsyncOpenAI(
 )
 
 # --- ЛИМИТЫ НА ВХОДЯЩИЕ ДАННЫЕ ---
-MAX_TEXT_LENGTH = 15000  # Максимум символов для текстового сообщения
-MAX_FILE_LENGTH = 60000  # Максимум символов для присланного файла
+MAX_TEXT_LENGTH = 15000  
+MAX_FILE_LENGTH = 60000  
 
 # --- НАСТРОЙКИ БАЗЫ ДАННЫХ (SQLite) ---
 Base = declarative_base()
@@ -161,7 +161,6 @@ async def process_aggregated_text(message: types.Message, text: str):
     chat_id = message.chat.id
     chat_type = message.chat.type
     
-    # --- ПРОВЕРКА ЛИМИТА ТЕКСТА (ЭКОНОМИЯ ТОКЕНОВ) ---
     if len(text) > MAX_TEXT_LENGTH:
         await message.reply(f"Слышь, щегол! Ты прислал {len(text)} символов. А мой старческий мозг может переварить максимум {MAX_TEXT_LENGTH}. Сократи текст или пришли его файлом!")
         return
@@ -271,7 +270,7 @@ async def process_aggregated_text(message: types.Message, text: str):
         logging.error(f"Ошибка API: {e}")
         await message.reply("Прошу прощения, сударь. Видимо, текст настолько огромен, что мои старческие нейроны не выдержали.")
 
-# --- ОБРАБОТЧИК ФАЙЛОВ ---
+# --- ОБРАБОТЧИК ФАЙЛОВ (ИСПРАВЛЕНА КОДИРОВКА) ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
@@ -294,7 +293,21 @@ async def handle_document(message: types.Message):
         file = await bot.get_file(document.file_id)
         downloaded_file = await bot.download_file(file.file_path)
         
-        code_text = downloaded_file.read().decode('utf-8')
+        # Читаем байты
+        file_bytes = downloaded_file.read()
+        
+        # Пытаемся декодировать текст в разных кодировках
+        code_text = None
+        for enc in ['utf-8', 'cp1251', 'koi8-r', 'utf-16']:
+            try:
+                code_text = file_bytes.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
+        
+        if not code_text:
+            await message.reply("Файл не читается. Убедись, что это обычный текст в кодировке UTF-8 или Windows-1251.")
+            return
         
         # --- ПРОВЕРКА ЛИМИТА ФАЙЛА (ЭКОНОМИЯ ТОКЕНОВ) ---
         if len(code_text) > MAX_FILE_LENGTH:
@@ -320,11 +333,9 @@ async def handle_document(message: types.Message):
         await send_long_message(message, bot_reply)
         await save_user_message(user_id, "assistant", bot_reply)
 
-    except UnicodeDecodeError:
-        await message.reply("Файл не читается. Убедись, что это обычный текст в кодировке UTF-8, а не какая-то бинарная мерзость.")
     except Exception as e:
         logging.error(f"ОШИБКА ПРИ АНАЛИЗЕ ФАЙЛА: {e}")
-        await message.reply(f"Тьфу! Ошибка при анализе файла. Детали в логах.")
+        await message.reply(f"Тьфу! Ошибка при анализе файла. Смотри логи на BotHost.")
 
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
