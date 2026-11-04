@@ -18,18 +18,16 @@ from sqlalchemy import String, Text, BigInteger, select
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 
-# Получаем токены из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
 
-# Инициализация бота и клиента
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 client = AsyncOpenAI(
     api_key=PLUSVIBE_API_KEY,
     base_url="https://plusvibeapi.ru/v1",
-    timeout=30.0 
+    timeout=60.0 # Увеличили таймаут, так как склеенный код может обрабатываться дольше
 )
 
 # --- НАСТРОЙКИ БАЗЫ ДАННЫХ (SQLite) ---
@@ -48,11 +46,8 @@ class ChatContext(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
     message_text: Mapped[str] = mapped_column(Text)
 
-# Создаем файл базы данных bot_memory.db в папке с ботом
-# sqlite+aiosqlite:/// означает локальный файл
 engine = create_async_engine("sqlite+aiosqlite:///bot_memory.db", echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-logging.info("База данных SQLite инициализирована.")
 
 # --- ФУНКЦИИ ДЛЯ РАБОТЫ С БД ---
 async def get_user_history(user_id: int) -> list:
@@ -61,7 +56,6 @@ async def get_user_history(user_id: int) -> list:
             select(UserMessage).where(UserMessage.user_id == user_id).order_by(UserMessage.id.desc()).limit(10)
         )
         messages = result.scalars().all()
-        # Переворачиваем в хронологический порядок
         return [{"role": m.role, "content": m.content} for m in reversed(messages)]
 
 async def save_user_message(user_id: int, role: str, content: str):
@@ -109,69 +103,51 @@ SYSTEM_PROMPT = (
 
 CODE_PROMPT = (
     "Ты — Дед-пердед, но сейчас ты выступаешь в роли опытного, циничного и ворчливого Senior-разработчика. "
-    "Твоя задача — проанализировать код, ошибку или технический вопрос, который прислал пользователь. "
-    "Найди баги, укажи на плохой стиль, объясни, почему код не работает (если это ошибка), и дай рекомендации по исправлению. "
-    "Ты можешь быть токсичным и грубым (использовать мат), если пользователь написал полную чушь, но твои технические советы должны быть точными и полезными. "
-    "Если код хороший — похвали сквозь зубы. Если это просто вопрос 'умеешь ли ты кодить' — ответь с достоинством, что ты старый хакер."
+    "Твоя задача — проанализировать код, ошибку или технический вопрос. "
+    "Найди баги, укажи на плохой стиль, объясни, почему код не работает. "
+    "Ты можешь быть токсичным и грубым (использовать мат), но твои технические советы должны быть точными. "
+    "Если код хороший — похвали сквозь зубы."
 )
 
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "draw"]
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```"]
 
-# --- ФОНОВАЯ ЗАДАЧА ---
-async def background_chatter():
-    while True:
-        await asyncio.sleep(AUTO_CHATTER_INTERVAL)
-        try:
-            async with async_session() as session:
-                result = await session.execute(select(ChatContext.chat_id).distinct())
-                chat_ids = result.scalars().all()
-                
-                for chat_id in chat_ids:
-                    if random.random() < AUTO_CHATTER_CHANCE:
-                        context = await get_chat_context(chat_id)
-                        if len(context) >= 3:
-                            model = get_model("background")
-                            response = await client.chat.completions.create(
-                                model=model,
-                                messages=[
-                                    {"role": "system", "content": SYSTEM_PROMPT + " Сейчас ты видишь переписку в чате. Вмешайся в нее своим экспертным или ворчливым мнением (но без мата, если не грубят)."},
-                                    {"role": "system", "content": f"Последние сообщения в чате:\n" + "\n".join(context[-5:])}
-                                ],
-                                temperature=0.9
-                            )
-                            reply = response.choices[0].message.content
-                            await bot.send_message(chat_id=chat_id, text=reply)
-                            logging.info(f"Бот сам влез в чат {chat_id}")
-        except Exception as e:
-            logging.error(f"Ошибка фонового чата: {e}")
+# --- МЕХАНИЗМ СКЛЕИВАНИЯ СООБЩЕНИЙ ---
+message_buffers = {} # user_id: {"text": str, "message": types.Message, "task": asyncio.Task}
 
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его сюда, я поржу.")
+async def delayed_process(user_id: int):
+    # Ждем 1.5 секунды, чтобы Телега успела прислать все куски
+    await asyncio.sleep(1.5) 
+    data = message_buffers.pop(user_id, None)
+    if not data:
+        return
+    
+    message = data["message"]
+    full_text = data["text"]
+    
+    try:
+        await process_aggregated_text(message, full_text)
+    except Exception as e:
+        logging.error(f"Ошибка при обработке склеенного сообщения: {e}")
+        await message.reply("Тьфу! Даже мои старческие нейроны не выдержали такого объема бреда.")
 
-@dp.message()
-async def handle_message(message: types.Message):
+async def process_aggregated_text(message: types.Message, text: str):
     user_id = message.from_user.id
     chat_id = message.chat.id
     chat_type = message.chat.type
     
-    if not message.text:
-        return 
-
-    text_lower = message.text.lower()
+    text_lower = text.lower()
     words = text_lower.split()
     
-    # Сохраняем контекст чата в БД
-    sender_name = message.from_user.first_name or "Кто-то"
-    await save_chat_message(chat_id, f"{sender_name}: {message.text}")
+    await save_chat_message(chat_id, f"{message.from_user.first_name or 'Кто-то'}: {text}")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
-    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
     is_reply_to_bot = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
     is_news = message.forward_from_chat or message.forward_from or "http" in text_lower 
-    is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in message.text
+    
+    is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
+    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not is_code_request
 
     # --- ЛОГИКА РИСОВАНИЯ ---
     if is_draw_request:
@@ -181,17 +157,16 @@ async def handle_message(message: types.Message):
                 model=get_model("simple_chat"),
                 messages=[
                     {"role": "system", "content": "Выдели из сообщения пользователя только суть того, что нужно нарисовать. Убери обращения и слова (нарисуй, сгенерируй). Верни ТОЛЬКО текст промпта, без кавычек. Если запрос нарушает правила безопасности, верни ровно одно слово: REFUSED."},
-                    {"role": "user", "content": message.text}
+                    {"role": "user", "content": text}
                 ],
                 temperature=0.1
             )
             clean_prompt = extract_response.choices[0].message.content.strip()
             
             if "REFUSED" in clean_prompt.upper() or "не могу" in clean_prompt.lower() or "извините" in clean_prompt.lower() or "запрещ" in clean_prompt.lower():
-                await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость. Задайте нормальный промпт.")
+                await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость.")
                 return
 
-            logging.info(f"Генерация картинки по промпту: {clean_prompt}")
             response = await client.images.generate(
                 model=get_model("image"),
                 prompt=clean_prompt,
@@ -214,45 +189,39 @@ async def handle_message(message: types.Message):
             if photo_to_send:
                 await message.reply_photo(photo=photo_to_send, caption=f"Держи, сударь. Промпт: {clean_prompt}")
             else:
-                await message.reply("Картинка сгенерировалась, но я не смог её скачать. Наверное, интернет барахлит.")
+                await message.reply("Картинка сгенерировалась, но я не смог её скачать.")
             
         except Exception as e:
             error_text = str(e).lower()
             logging.error(f"Ошибка генерации картинки: {e}")
             if "content" in error_text or "policy" in error_text or "400" in error_text or "safety" in error_text or "invalid" in error_text:
-                await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость. Задайте нормальный промпт.")
+                await message.reply("А не пошли бы вы, сударь, со своими извращениями! Цензура не пропустит такую мерзость.")
             else:
-                await message.reply("Тьфу! Кисти засохли, холст порвался. Проверь баланс или настройки API, а меня не трогай.")
+                await message.reply("Тьфу! Кисти засохли. Проверь баланс или настройки API.")
         return 
 
-    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА ---
+    # --- ЛОГИКА ТЕКСТОВОГО ОТВЕТА И АНАЛИЗА КОДА ---
     if chat_type in ["group", "supergroup"]:
         if not (is_triggered or is_reply_to_bot or is_news or is_code_request):
             return
 
-    # Загружаем историю из БД
     history = await get_user_history(user_id)
     
     if is_code_request:
         task = "code_review"
         active_prompt = CODE_PROMPT
-        prompt_text = message.text
-        logging.info("Запуск анализа кода...")
+        logging.info(f"Запуск анализа кода (длина {len(text)} символов)...")
     elif is_news:
         task = "news_analysis"
         active_prompt = SYSTEM_PROMPT
-        prompt_text = f"[Пользователь переслал новость/ссылку]: {message.text}\nВыскажи свое мнение по этому поводу."
+        text = f"[Пользователь переслал новость/ссылку]: {text}\nВыскажи свое мнение."
     else:
         task = "smart_chat" if (is_triggered or is_reply_to_bot) else "simple_chat"
         active_prompt = SYSTEM_PROMPT
-        prompt_text = message.text
 
-    # Сохраняем сообщение пользователя в БД
-    await save_user_message(user_id, "user", prompt_text)
-    
-    # Добавляем в локальный список для текущего запроса
-    history.append({"role": "user", "content": prompt_text})
-    history = history[-10:] # Обрезаем, если слишком длинно
+    await save_user_message(user_id, "user", text)
+    history.append({"role": "user", "content": text})
+    history = history[-10:]
 
     await bot.send_chat_action(chat_id=chat_id, action="typing")
 
@@ -265,19 +234,72 @@ async def handle_message(message: types.Message):
         
         bot_reply = response.choices[0].message.content
         await message.answer(bot_reply)
-        
-        # Сохраняем ответ бота в БД
         await save_user_message(user_id, "assistant", bot_reply)
 
     except Exception as e:
         logging.error(f"Ошибка API: {e}")
-        await message.answer("Прошу прощения, мои старческие нейроны дали сбой. Повторите.")
+        await message.answer("Прошу прощения, сударь. Видимо, текст настолько огромен, что мои старческие нейросети не выдержали. Попробуйте прислать файлом.")
+
+# --- ОБРАБОТЧИКИ ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("Приветствую, сударь. Чем могу быть полезен? Или желаете поспорить?\n\nКстати, я умею рисовать! Просто попроси: 'Дед, нарисуй кота в космосе'.\n\nА еще я могу разобрать твой кривой код. Кидай его сюда, я поржу.")
+
+@dp.message()
+async def handle_message(message: types.Message):
+    if not message.text:
+        return
+        
+    user_id = message.from_user.id
+    
+    # Игнорируем команды, чтобы не буферизировать их
+    if message.text.startswith('/'):
+        return
+        
+    # Добавляем текст в буфер
+    if user_id in message_buffers:
+        message_buffers[user_id]["text"] += "\n" + message.text
+        # Отменяем старый таймер, так как пришло новое сообщение
+        if message_buffers[user_id]["task"]:
+            message_buffers[user_id]["task"].cancel()
+    else:
+        # Если буфера нет, создаем новый. Сохраняем самое первое сообщение для ответа
+        message_buffers[user_id] = {"text": message.text, "message": message}
+        
+    # Запускаем новый таймер
+    task = asyncio.create_task(delayed_process(user_id))
+    message_buffers[user_id]["task"] = task
+
+# --- ФОНОВАЯ ЗАДАЧА ---
+async def background_chatter():
+    while True:
+        await asyncio.sleep(AUTO_CHATTER_INTERVAL)
+        try:
+            async with async_session() as session:
+                result = await session.execute(select(ChatContext.chat_id).distinct())
+                chat_ids = result.scalars().all()
+                
+                for chat_id in chat_ids:
+                    if random.random() < AUTO_CHATTER_CHANCE:
+                        context = await get_chat_context(chat_id)
+                        if len(context) >= 3:
+                            model = get_model("background")
+                            response = await client.chat.completions.create(
+                                model=model,
+                                messages=[
+                                    {"role": "system", "content": SYSTEM_PROMPT + " Сейчас ты видишь переписку в чате. Вмешайся в нее своим мнением (без мата, если не грубят)."},
+                                    {"role": "system", "content": f"Последние сообщения в чате:\n" + "\n".join(context[-5:])}
+                                ],
+                                temperature=0.9
+                            )
+                            reply = response.choices[0].message.content
+                            await bot.send_message(chat_id=chat_id, text=reply)
+        except Exception as e:
+            logging.error(f"Ошибка фонового чата: {e}")
 
 # --- ТОЧКА ВХОДА ---
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
-    
-    # Создаем таблицы в БД при запуске (если файла bot_memory.db еще нет)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         logging.info("Таблицы в SQLite проверены/созданы.")
