@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("API_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID") # <-- Ключ Jamendo
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID")
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 if not BOT_TOKEN or not PLUSVIBE_API_KEY:
@@ -101,38 +101,26 @@ def format_text(text: str) -> str:
     return text
 
 async def search_jamendo(query: str) -> dict | None:
-    if not JAMENDO_CLIENT_ID:
-        return None
+    if not JAMENDO_CLIENT_ID: return None
     url = "https://api.jamendo.com/v3.0/tracks/"
-    params = {
-        "client_id": JAMENDO_CLIENT_ID,
-        "format": "json",
-        "limit": 1,
-        "search": query,
-        "audioformat": "mp32"
-    }
+    params = {"client_id": JAMENDO_CLIENT_ID, "format": "json", "limit": 1, "search": query, "audioformat": "mp32"}
     try:
         async with httpx.AsyncClient(timeout=15.0) as http_client:
             response = await http_client.get(url, params=params)
             response.raise_for_status()
             data = response.json()
             results = data.get("results", [])
-            if not results:
-                return None
+            if not results: return None
             track = results[0]
-            return {
-                "name": track.get("name", "Неизвестный трек"),
-                "artist": track.get("artist_name", "Неизвестный исполнитель"),
-                "audio_url": track.get("audio", ""),
-            }
+            return {"name": track.get("name", "Неизвестный трек"), "artist": track.get("artist_name", "Неизвестный исполнитель"), "audio_url": track.get("audio", "")}
     except Exception as e:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ ---
+# --- АГЕНТЫ (ОБНОВЛЕННЫЕ ПРОМПТЫ) ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — Нафаня. Твое имя — Нафаня. Если тебя спросят, как тебя зовут, отвечай, что тебя зовут Нафаня. Общайся обычным, живым языком. Отвечай кратко. Для выделения важных слов используй **жирный шрифт**.",
+        "prompt": "Ты — Нафаня. Твое имя — Нафаня. Если тебя спросят, как тебя зовут, отвечай, что тебя зовут Нафаня. Общайся обычным, живым языком, как хороший знакомый. Избегай сложных терминов и канцелярита. Отвечай кратко. Для выделения важных слов используй **жирный шрифт**.",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
@@ -140,7 +128,7 @@ AGENTS = {
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "prompt": "Ты — Нафаня, аналитик. Дай краткую и объективную оценку политической новости. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи, если пользователь прямо не попросил 'разверни' или 'приведи пруфы'. Твое имя — Нафаня.",
+        "prompt": "Ты — Нафаня. Ты обсуждаешь политические новости с другом на кухне. Твоя задача — дать краткую оценку новости (2-3 предложения) ПРОСТЫМ, человеческим языком. Избегай заумных фраз вроде 'дипломатический сигнал', 'анонсируют встречу' и т.д. Говори прямо: кто что сделал, и что это значит на самом деле. Если просят подробностей — только тогда расписывай детали.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
@@ -152,13 +140,8 @@ AGENTS = {
 # --- ФУНКЦИИ БД ---
 async def get_user_history(chat_id: int, user_id: int) -> list:
     async with async_session() as session:
-        result = await session.execute(
-            select(UserMessage)
-            .where(UserMessage.chat_id == chat_id, UserMessage.user_id == user_id)
-            .order_by(UserMessage.id.desc()).limit(10)
-        )
-        messages = result.scalars().all()
-        return [{"role": m.role, "content": m.content} for m in reversed(messages)]
+        result = await session.execute(select(UserMessage).where(UserMessage.chat_id == chat_id, UserMessage.user_id == user_id).order_by(UserMessage.id.desc()).limit(10))
+        return [{"role": m.role, "content": m.content} for m in reversed(result.scalars().all())]
 
 async def save_user_message(chat_id: int, user_id: int, role: str, content: str):
     async with async_session() as session:
@@ -167,11 +150,8 @@ async def save_user_message(chat_id: int, user_id: int, role: str, content: str)
 
 async def get_chat_context(chat_id: int) -> list:
     async with async_session() as session:
-        result = await session.execute(
-            select(ChatContext).where(ChatContext.chat_id == chat_id).order_by(ChatContext.id.desc()).limit(7)
-        )
-        messages = result.scalars().all()
-        return [m.message_text for m in reversed(messages)]
+        result = await session.execute(select(ChatContext).where(ChatContext.chat_id == chat_id).order_by(ChatContext.id.desc()).limit(7))
+        return [m.message_text for m in reversed(result.scalars().all())]
 
 async def save_chat_message(chat_id: int, message_text: str):
     async with async_session() as session:
@@ -180,27 +160,19 @@ async def save_chat_message(chat_id: int, message_text: str):
 
 async def get_active_reminders(chat_id: int, user_id: int) -> list:
     async with async_session() as session:
-        result = await session.execute(
-            select(Reminder).where(Reminder.chat_id == chat_id, Reminder.user_id == user_id).order_by(Reminder.remind_time)
-        )
+        result = await session.execute(select(Reminder).where(Reminder.chat_id == chat_id, Reminder.user_id == user_id).order_by(Reminder.remind_time))
         return result.scalars().all()
 
 async def delete_reminders_by_query(chat_id: int, user_id: int, text_query: str = None):
     async with async_session() as session:
         if text_query:
-            stmt = select(Reminder).where(
-                Reminder.chat_id == chat_id, 
-                Reminder.user_id == user_id,
-                Reminder.text.ilike(f"%{text_query}%")
-            )
+            stmt = select(Reminder).where(Reminder.chat_id == chat_id, Reminder.user_id == user_id, Reminder.text.ilike(f"%{text_query}%"))
             result = await session.execute(stmt)
-            for rem in result.scalars().all():
-                await session.delete(rem)
+            for rem in result.scalars().all(): await session.delete(rem)
         else:
             stmt = select(Reminder).where(Reminder.chat_id == chat_id, Reminder.user_id == user_id)
             result = await session.execute(stmt)
-            for rem in result.scalars().all():
-                await session.delete(rem)
+            for rem in result.scalars().all(): await session.delete(rem)
         await session.commit()
 
 async def cleanup_db():
@@ -208,18 +180,8 @@ async def cleanup_db():
         await asyncio.sleep(3600 * 24) 
         try:
             async with async_session() as session:
-                await session.execute(text("""
-                    DELETE FROM chat_contexts WHERE id NOT IN (
-                        SELECT id FROM (
-                            SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY id DESC) as rn
-                            FROM chat_contexts
-                        ) WHERE rn <= 50
-                    )
-                """))
-                await session.execute(
-                    text("DELETE FROM reminders WHERE remind_time < :now"), 
-                    {"now": get_moscow_datetime_obj()}
-                )
+                await session.execute(text("DELETE FROM chat_contexts WHERE id NOT IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY id DESC) as rn FROM chat_contexts) WHERE rn <= 50)"))
+                await session.execute(text("DELETE FROM reminders WHERE remind_time < :now"), {"now": get_moscow_datetime_obj()})
                 await session.commit()
         except Exception as e:
             logging.error(f"Ошибка очистки БД: {e}")
@@ -249,18 +211,15 @@ async def keep_typing(chat_id: int):
 
 async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
-    
     formatted_text = format_text(text)
     max_length = 4000
     chunks = [formatted_text[i:i+max_length] for i in range(0, len(formatted_text), max_length)]
-    
     for chunk in chunks:
         try:
             await message.reply(chunk, parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Ошибка парсинга HTML: {e}. Отправляю как обычный текст.")
-            clean_chunk = re.sub(r'<[^>]+>', '', chunk)
-            await message.reply(clean_chunk)
+            await message.reply(re.sub(r'<[^>]+>', '', chunk))
         await asyncio.sleep(0.5)
 
 def truncate_history(history: list, max_chars: int = 2000) -> list:
@@ -299,23 +258,15 @@ async def reminder_worker():
         try:
             now = get_moscow_datetime_obj()
             async with async_session() as session:
-                result = await session.execute(
-                    select(Reminder).where(Reminder.remind_time <= now)
-                )
+                result = await session.execute(select(Reminder).where(Reminder.remind_time <= now))
                 reminders = result.scalars().all()
-                
                 for rem in reminders:
                     try:
                         formatted_rem = format_text(f"🔔 **Напоминаю:**\n{rem.text}")
-                        await bot.send_message(
-                            chat_id=rem.chat_id,
-                            text=formatted_rem,
-                            parse_mode="HTML"
-                        )
+                        await bot.send_message(chat_id=rem.chat_id, text=formatted_rem, parse_mode="HTML")
                     except Exception as e:
                         logging.error(f"Не удалось отправить напоминание в {rem.chat_id}: {e}")
                         await bot.send_message(chat_id=rem.chat_id, text=f"🔔 Напоминаю:\n{rem.text}")
-                    
                     await session.delete(rem)
                 await session.commit()
         except Exception as e:
@@ -350,12 +301,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
-    
-    if image_b64:
-        is_draw_request = False
-    else:
-        is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
-
+    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not image_b64
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
@@ -365,9 +311,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_reminder_list = any(trigger in text_lower for trigger in REMINDER_LIST_TRIGGERS)
     is_reminder_delete = any(trigger in text_lower for trigger in REMINDER_DELETE_TRIGGERS)
 
-    if is_reminder_delete or is_reminder_list:
-        is_reminder_create = False
-    
+    if is_reminder_delete or is_reminder_list: is_reminder_create = False
     if is_code_request: is_draw_request = False
     if is_political_request: is_draw_request = False
     if is_music_request: 
@@ -379,256 +323,134 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     
     if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete or is_music_request):
         now = time.time()
-        if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
-            return
-            
+        if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN: return
         if random.random() < CHANCE_TO_JOIN_CHAT:
             context_msgs = await get_chat_context(chat_id)
             if len(context_msgs) < 3: return 
-            
             chat_join_cooldowns[chat_id] = now
             agent = AGENTS["chat"]
-            
             current_time = get_moscow_time()
             prompt = f"Текущее время: {current_time}.\nТы видишь переписку в чате:\n" + "\n".join(context_msgs) + "\n\nВклинись в этот разговор. Прокомментируй тему, дай совет или выскажи мнение. Отвечай коротко (1-2 предложения)."
-            
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 async with api_semaphore:
-                    response = await client.chat.completions.create(
-                        model=agent["model"],
-                        messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}],
-                        temperature=0.9
-                    )
-                reply = safe_get_content(response)
-                await send_long_message(message, reply)
-            except Exception as e:
-                logging.error(f"Ошибка вклинивания: {e}")
-            finally:
-                typing_task.cancel()
+                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9)
+                await send_long_message(message, safe_get_content(response))
+            except Exception as e: logging.error(f"Ошибка вклинивания: {e}")
+            finally: typing_task.cancel()
         return 
 
     now = time.time()
-    if user_id in user_cooldowns and now - user_cooldowns[user_id] < COOLDOWN_SECONDS:
-        return
+    if user_id in user_cooldowns and now - user_cooldowns[user_id] < COOLDOWN_SECONDS: return
     user_cooldowns[user_id] = now
 
     async with user_locks[key]:
         
-        # --- ЛОГИКА ПОИСКА МУЗЫКИ ---
+        # --- МУЗЫКА ---
         if is_music_request:
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
-                extract_prompt = f"Из запроса пользователя вычлени только исполнителя и название песни для поиска. Верни ТОЛЬКО поисковый запрос, без лишних слов. Запрос: '{text}'"
+                extract_prompt = f"Из запроса пользователя вычлени только исполнителя и название песни для поиска. Верни ТОЛЬКО поисковый запрос. Запрос: '{text}'"
                 async with api_semaphore:
-                    extract_response = await client.chat.completions.create(
-                        model="deepseek-v4.1-flash",
-                        messages=[{"role": "user", "content": extract_prompt}],
-                        temperature=0.1
-                    )
+                    extract_response = await client.chat.completions.create(model="deepseek-v4.1-flash", messages=[{"role": "user", "content": extract_prompt}], temperature=0.1)
                 search_query = safe_get_content(extract_response).strip()
-                
                 track = await search_jamendo(search_query)
-                
                 if track and track.get("audio_url"):
-                    await message.reply_audio(
-                        audio=track["audio_url"],
-                        title=track["name"],
-                        performer=track["artist"],
-                        caption=f"Нашел трек: **{track['name']}** — {track['artist']}"
-                    )
+                    await message.reply_audio(audio=track["audio_url"], title=track["name"], performer=track["artist"], caption=f"Нашел трек: **{track['name']}** — {track['artist']}")
                 else:
-                    await message.reply(f"Не удалось найти трек по запросу «{search_query}». Попробуй переформулировать.")
-            except Exception as e:
-                logging.exception("Ошибка поиска музыки")
-                await message.reply("Не удалось найти музыку. Попробуй позже.")
-            finally:
-                typing_task.cancel()
+                    await message.reply(f"Не удалось найти трек по запросу «{search_query}».")
+            except Exception: await message.reply("Не удалось найти музыку.")
+            finally: typing_task.cancel()
             return
 
-        # ... (Логика напоминаний и рисования без изменений) ...
+        # --- НАПОМИНАНИЯ ---
         if is_reminder_list:
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 reminders = await get_active_reminders(chat_id, user_id)
-                if not reminders:
-                    await message.reply("У тебя нет активных напоминаний.")
+                if not reminders: await message.reply("У тебя нет активных напоминаний.")
                 else:
                     reply_text = "**Твои активные напоминания:**\n\n"
                     for i, rem in enumerate(reminders, 1):
-                        t_str = rem.remind_time.strftime("%d.%m.%Y в %H:%M")
-                        reply_text += f"{i}. **{t_str}** — {rem.text}\n"
-                    
-                    formatted_text = format_text(reply_text)
-                    await message.reply(formatted_text, parse_mode="HTML")
-            except Exception as e:
-                logging.error(f"Ошибка получения списка напоминаний: {e}")
-                await message.reply("Не удалось получить список напоминаний.")
-            finally:
-                typing_task.cancel()
+                        reply_text += f"{i}. **{rem.remind_time.strftime('%d.%m.%Y в %H:%M')}** — {rem.text}\n"
+                    await message.reply(format_text(reply_text), parse_mode="HTML")
+            finally: typing_task.cancel()
             return
 
         if is_reminder_delete:
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
-                current_time = get_moscow_time()
-                parse_prompt = (
-                    f"Текущее время: {current_time}.\n"
-                    f"Пользователь пишет: '{text}'.\n"
-                    f"Он хочет удалить напоминание(я).\n"
-                    f"Твоя задача — понять, что именно он хочет удалить.\n"
-                    f"Если он хочет удалить ВСЕ напоминания (например: 'удали все'), верни JSON: {{\"delete_all\": true}}.\n"
-                    f"Если он хочет удалить конкретное напоминание, извлеки ключевое слово из его текста и верни JSON: {{\"query\": \"ключевое слово\"}}.\n"
-                    f"Ответь СТРОГО в формате JSON без разметки."
-                )
-                
+                parse_prompt = f"Пользователь пишет: '{text}'. Он хочет удалить напоминание. Если хочет удалить ВСЕ, верни JSON: {{\"delete_all\": true}}. Если конкретное, выдели слово и верни JSON: {{\"query\": \"слово\"}}. Ответь СТРОГО JSON."
                 async with api_semaphore:
-                    parse_response = await client.chat.completions.create(
-                        model="gpt-6.1-sol",
-                        messages=[{"role": "user", "content": parse_prompt}],
-                        temperature=0.1
-                    )
-                
-                raw_json = safe_get_content(parse_response).strip()
-                raw_json = re.sub(r'```json|```', '', raw_json).strip()
-                
-                data = json.loads(raw_json)
-                
+                    parse_response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "user", "content": parse_prompt}], temperature=0.1)
+                data = json.loads(re.sub(r'```json|```', '', safe_get_content(parse_response)).strip())
                 if data.get("delete_all"):
-                    await delete_reminders_by_query(chat_id, user_id, text_query=None)
+                    await delete_reminders_by_query(chat_id, user_id, None)
                     await message.reply("Хорошо, я удалил **все** твои напоминания.")
                 elif data.get("query"):
-                    query = data["query"]
-                    await delete_reminders_by_query(chat_id, user_id, text_query=query)
-                    await message.reply(f"Понял. Если было напоминание со словом **«{query}»**, я его удалил.")
-                else:
-                    await message.reply("Я не понял, какое именно напоминание нужно удалить. Уточни.")
-                    
-            except json.JSONDecodeError:
-                await message.reply("Произошла ошибка при разборе запроса на удаление.")
-            except Exception as e:
-                logging.error(f"Ошибка удаления напоминания: {e}")
-                await message.reply("Не удалось удалить напоминание.")
-            finally:
-                typing_task.cancel()
+                    await delete_reminders_by_query(chat_id, user_id, data["query"])
+                    await message.reply(f"Понял. Если было напоминание со словом **«{data['query']}»**, я его удалил.")
+                else: await message.reply("Не понял, какое именно напоминание удалить.")
+            except Exception: await message.reply("Не удалось удалить напоминание.")
+            finally: typing_task.cancel()
             return
 
         if is_reminder_create:
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 current_time = get_moscow_time()
-                parse_prompt = (
-                    f"Текущее время: {current_time} (Москва).\n"
-                    f"Пользователь просит: '{text}'.\n"
-                    f"Твоя задача — выделить текст напоминания и точное время.\n"
-                    f"Ответь СТРОГО в формате JSON без разметки: "
-                    f'{{"text": "что напомнить", "datetime_str": "YYYY-MM-DD HH:MM"}}\n'
-                    f"Если время не указано или его невозможно понять, верни: {{\"error\": \"no_time\"}}"
-                )
-                
+                parse_prompt = f"Текущее время: {current_time} (Москва). Пользователь просит: '{text}'. Выдели текст и время. Ответь JSON: {{\"text\": \"что\", \"datetime_str\": \"YYYY-MM-DD HH:MM\"}}. Если нет времени: {{\"error\": \"no_time\"}}"
                 async with api_semaphore:
-                    parse_response = await client.chat.completions.create(
-                        model="gpt-6.1-sol",
-                        messages=[{"role": "user", "content": parse_prompt}],
-                        temperature=0.1
-                    )
-                
-                raw_json = safe_get_content(parse_response).strip()
-                raw_json = re.sub(r'```json|```', '', raw_json).strip()
-                
-                data = json.loads(raw_json)
-                
-                if "error" in data:
-                    await message.reply("Я не понял, на какое время ставить напоминание. Уточни, пожалуйста.")
-                    return
-                    
-                rem_text = data["text"]
-                rem_time_str = data["datetime_str"]
-                
-                rem_datetime = datetime.strptime(rem_time_str, "%Y-%m-%d %H:%M")
-                
-                if rem_datetime <= get_moscow_datetime_obj():
-                    await message.reply("Это время уже прошло. Назначь время в будущем.")
-                    return
-                
+                    parse_response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "user", "content": parse_prompt}], temperature=0.1)
+                data = json.loads(re.sub(r'```json|```', '', safe_get_content(parse_response)).strip())
+                if "error" in data: await message.reply("Я не понял время. Уточни (например: 'через 10 минут')."); return
+                rem_datetime = datetime.strptime(data["datetime_str"], "%Y-%m-%d %H:%M")
+                if rem_datetime <= get_moscow_datetime_obj(): await message.reply("Это время уже прошло."); return
                 async with async_session() as session:
-                    session.add(Reminder(chat_id=chat_id, user_id=user_id, text=rem_text, remind_time=rem_datetime))
+                    session.add(Reminder(chat_id=chat_id, user_id=user_id, text=data["text"], remind_time=rem_datetime))
                     await session.commit()
-                
-                formatted_time = rem_datetime.strftime("%d.%m.%Y в %H:%M")
-                reply_text = format_text(f"Хорошо, напомню **{formatted_time}**:\n_{rem_text}_")
-                await message.reply(reply_text, parse_mode="HTML")
-                
-            except json.JSONDecodeError:
-                await message.reply("Произошла ошибка при разборе времени. Попробуй переформулировать.")
-            except Exception as e:
-                logging.error(f"Ошибка создания напоминания: {e}")
-                await message.reply(f"Не удалось создать напоминание. Ошибка: {str(e)[:50]}")
-            finally:
-                typing_task.cancel()
+                await message.reply(format_text(f"Хорошо, напомню **{rem_datetime.strftime('%d.%m.%Y в %H:%M')}**:\n_{data['text']}_"), parse_mode="HTML")
+            except Exception: await message.reply("Ошибка создания напоминания.")
+            finally: typing_task.cancel()
             return
 
+        # --- РИСОВАНИЕ ---
         if is_draw_request:
             agent = AGENTS["draw"]
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 async with api_semaphore:
-                    extract_response = await client.chat.completions.create(
-                        model=agent["model"],
-                        messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": text}],
-                        temperature=0.1
-                    )
+                    extract_response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": text}], temperature=0.1)
                 clean_prompt = safe_get_content(extract_response).strip()
-                
                 async with api_semaphore:
                     response = await client.images.generate(model="z-image-turbo", prompt=clean_prompt, n=1, size="1024x1024")
-                
                 if not response.data: raise RuntimeError("Пустой ответ")
                 image_data = response.data[0]
                 photo_to_send = None
-                
                 if image_data.url:
                     async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as http_client:
                         img_response = await http_client.get(image_data.url)
-                        if img_response.status_code == 200:
-                            photo_to_send = BufferedInputFile(img_response.content, filename="image.jpg")
-                elif image_data.b64_json:
-                    photo_to_send = BufferedInputFile(base64.b64decode(image_data.b64_json), filename="image.jpg")
-
-                if photo_to_send:
-                    await message.reply_photo(
-                        photo=photo_to_send, 
-                        caption=f"Вот что получилось. Промпт: {clean_prompt}"
-                    )
-            except Exception as e:
-                logging.exception("Ошибка картинки")
-                await message.reply(f"Не получилось сгенерировать картинку. Ошибка: {str(e)[:30]}")
-            finally:
-                typing_task.cancel()
+                        if img_response.status_code == 200: photo_to_send = BufferedInputFile(img_response.content, filename="image.jpg")
+                elif image_data.b64_json: photo_to_send = BufferedInputFile(base64.b64decode(image_data.b64_json), filename="image.jpg")
+                if photo_to_send: await message.reply_photo(photo=photo_to_send, caption=f"Вот что получилось. Промпт: {clean_prompt}")
+            except Exception as e: await message.reply(f"Не получилось сгенерировать картинку.")
+            finally: typing_task.cancel()
             return 
 
-        # --- ТЕКСТОВАЯ ЛОГИКА ---
+        # --- ТЕКСТ ---
         history = await get_user_history(chat_id, user_id)
         typing_task = asyncio.create_task(keep_typing(chat_id))
-        
         try:
-            current_time = get_moscow_time()
-            time_context = f"\n\nВажная информация: Текущая дата и время (по Москве) — {current_time}."
-
+            time_context = f"\n\nВажная информация: Текущая дата и время — {get_moscow_time()}."
             if is_code_request:
                 agent = AGENTS["code"]
                 final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
                 temp = 0.7
                 active_prompt = agent["prompt"] + time_context
-                
             elif is_political_request:
                 agent = AGENTS["political"]
                 search_results = await search_tavily(text)
-                final_text = (
-                    f"Тема: \"{text}\"\n\n"
-                    f"Данные из поиска:\n---\n{search_results}\n---\n"
-                    f"Дай КРАТКИЙ ответ на вопрос пользователя (1-3 предложения). Если он просит подробностей, тогда разверни анализ."
-                )
+                final_text = f"Тема: \"{text}\"\n\nДанные:\n---\n{search_results}\n---\nДай КРАТКИЙ ответ (1-3 предложения) ПРОСТЫМ языком. Если просит подробностей, тогда разверни анализ."
                 temp = 0.7
                 active_prompt = agent["prompt"] + time_context
             else:
@@ -641,45 +463,158 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             safe_history = truncate_history(history[-4:]) 
             
             if image_b64:
-                logging.info("ОТПРАВЛЯЮ ЗАПРОС С КАРТИНКОЙ (VISION)...")
-                messages = [{"role": "system", "content": active_prompt}]
-                for h in safe_history:
-                    messages.append(h)
-                
-                user_content = [{"type": "text", "text": final_text}]
-                user_content.append({
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
-                })
-                messages.append({"role": "user", "content": user_content})
+                messages = [{"role": "system", "content": active_prompt}] + safe_history + [{"role": "user", "content": [{"type": "text", "text": final_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}]
                 model_to_use = "gpt-6.1-sol" 
             else:
-                logging.info("ОТПРАВЛЯЮ ТЕКСТОВЫЙ ЗАПРОС...")
-                messages = [{"role": "system", "content": active_prompt}] + safe_history
-                messages.append({"role": "user", "content": final_text})
+                messages = [{"role": "system", "content": active_prompt}] + safe_history + [{"role": "user", "content": final_text}]
                 model_to_use = agent["model"]
 
             async with api_semaphore:
-                response = await client.chat.completions.create(
-                    model=model_to_use,
-                    messages=messages,
-                    temperature=temp
-                )
+                response = await client.chat.completions.create(model=model_to_use, messages=messages, temperature=temp)
             
             bot_reply = safe_get_content(response)
             await send_long_message(message, bot_reply)
             await save_user_message(chat_id, user_id, "assistant", bot_reply)
-
-        # ИСПРАВЛЕННЫЙ БЛОК EXCEPT
         except Exception as e:
-            error_str = str(e).lower()
-            logging.exception("Ошибка API")
-            if "connection" in error_str or "timeout" in error_str:
+            if "connection" in str(e).lower() or "timeout" in str(e).lower():
                 await message.reply("Ой, кажется, у меня пропала связь с сервером. Попробуй отправить сообщение еще раз через минуту.")
             else:
-                await message.reply("Произошла ошибка при обработке запроса. Попробуй позже.")
+                await message.reply("Произошла ошибка при обработке запроса.")
         finally:
             typing_task.cancel()
 
-# ... (ОСТАЛЬНОЙ КОД: голосовые, фото, файлы, текст - БЕЗ ИЗМЕНЕНИЙ) ...
-# (Вставьте сюда обработчики голосовых, фото, файлов и handle_message из предыдущего полного кода)
+# --- ОБРАБОТЧИКИ МЕДИА (Без изменений) ---
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    if not message.from_user: return
+    user_id, chat_id = message.from_user.id, message.chat.id
+    typing_task = asyncio.create_task(keep_typing(chat_id))
+    try:
+        file = await bot.get_file(message.voice.file_id)
+        buffer = io.BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        buffer.name = "voice.ogg"
+        buffer.seek(0)
+        async with api_semaphore:
+            transcript = await client.audio.transcriptions.create(model="whisper-large-v3-turbo", file=buffer)
+        text = transcript.text
+        typing_task.cancel()
+        await message.reply(f"🎤 Распознано: {text}")
+        if (chat_id, user_id) in message_buffers:
+            message_buffers[(chat_id, user_id)]["text"] += "\n" + text
+            if message_buffers[(chat_id, user_id)]["task"]: message_buffers[(chat_id, user_id)]["task"].cancel()
+        else:
+            message_buffers[(chat_id, user_id)] = {"text": text, "message": message, "is_reply": is_reply_to_bot_check(message), "is_forwarded": message.forward_origin is not None}
+        message_buffers[(chat_id, user_id)]["task"] = asyncio.create_task(delayed_process((chat_id, user_id)))
+    except Exception as e: await message.reply(f"Не удалось распознать голосовое.")
+    finally:
+        if not typing_task.cancelled(): typing_task.cancel()
+
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    if not message.from_user: return
+    user_id, chat_id = message.from_user.id, message.chat.id
+    try:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        buffer = io.BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        if message.caption:
+            await process_aggregated_text(message, message.caption, is_reply_to_bot_check(message), message.forward_origin is not None, image_b64=img_b64)
+        else:
+            async with api_semaphore:
+                response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": "Опиши картинку кратко."}, {"role": "user", "content": [{"type": "text", "text": "Что тут?"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}], temperature=0.5)
+            await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем: {safe_get_content(response)}]")
+            try: await message.react([types.ReactionTypeEmoji(emoji="👀")])
+            except: pass
+    except Exception as e: await message.reply("Не удалось обработать фото.")
+
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    if not message.from_user: return
+    user_id, chat_id = message.from_user.id, message.chat.id
+    document = message.document
+    filename = document.file_name or "file.txt"
+    if document.file_size and document.file_size > 1024 * 1024: await message.reply("Файл больше 1 МБ."); return
+    if os.path.splitext(filename)[1].lower() not in ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.jpg', '.jpeg', '.png']: await message.reply("Я понимаю только код и текст."); return
+    if os.path.splitext(filename)[1].lower() in ['.jpg', '.jpeg', '.png']: await message.reply("Пришли картинку как обычное фото."); return
+
+    typing_task = asyncio.create_task(keep_typing(chat_id))
+    try:
+        file = await bot.get_file(document.file_id)
+        downloaded_file = await bot.download_file(file.file_path)
+        code_text = decode_text(downloaded_file.read())
+        if len(code_text) > MAX_FILE_LENGTH: await message.reply("Файл слишком длинный."); return
+        
+        if not message.caption:
+            async with pending_files_locks[(chat_id, user_id)]:
+                pending_files[(chat_id, user_id)] = {"text": code_text, "filename": filename, "timestamp": time.time(), "status": "pending"}
+            await message.reply("Файл получен. Что с ним сделать? Напиши задачу.")
+            return
+        
+        async with api_semaphore:
+            response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": AGENTS["code"]["prompt"] + f"\nТекущее время: {get_moscow_time()}"}, {"role": "user", "content": f"Файл '{filename}'. Задача: '{message.caption}'.\n\nКод:\n\n{code_text}"}], temperature=0.7)
+        bot_reply = safe_get_content(response)
+        await send_long_message(message, bot_reply)
+        await save_user_message(chat_id, user_id, "assistant", bot_reply)
+    except Exception: await message.reply("Не удалось прочитать файл.")
+    finally: typing_task.cancel()
+
+# --- ТЕКСТ ---
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("Привет! Я — Нафаня. Могу ответить на вопросы, разобрать код, найти музыку, сгенерировать картинку, понять фото/голосовые и поставить напоминание. Спрашивай.")
+
+@dp.message(F.text)
+async def handle_message(message: types.Message):
+    if not message.text or not message.from_user: return
+    user_id, chat_id = message.from_user.id, message.chat.id
+    key = (chat_id, user_id)
+    if message.text.startswith('/'): return
+    
+    async with pending_files_locks[key]:
+        if key in pending_files:
+            file_data = pending_files[key]
+            if time.time() - file_data["timestamp"] > FILE_TTL_SECONDS: pending_files.pop(key, None)
+            elif file_data["status"] == "processing": return 
+            else:
+                file_data["status"] = "processing"
+                typing_task = asyncio.create_task(keep_typing(chat_id))
+                try:
+                    async with api_semaphore:
+                        response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": AGENTS["code"]["prompt"] + f"\nТекущее время: {get_moscow_time()}"}, {"role": "user", "content": f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"}], temperature=0.7)
+                    await send_long_message(message, safe_get_content(response))
+                    await save_user_message(chat_id, user_id, "assistant", safe_get_content(response))
+                    pending_files.pop(key, None)
+                except Exception: await message.reply("Ошибка при обработке файла.")
+                finally: typing_task.cancel()
+                return
+
+    if key in message_buffers:
+        message_buffers[key]["text"] += "\n" + message.text
+        message_buffers[key]["is_reply"] = message_buffers[key]["is_reply"] or is_reply_to_bot_check(message)
+        message_buffers[key]["is_forwarded"] = message_buffers[key]["is_forwarded"] or (message.forward_origin is not None)
+        if message_buffers[key]["task"]: message_buffers[key]["task"].cancel()
+    else:
+        message_buffers[key] = {"text": message.text, "message": message, "is_reply": is_reply_to_bot_check(message), "is_forwarded": message.forward_origin is not None}
+        
+    message_buffers[key]["task"] = asyncio.create_task(delayed_process(key))
+
+# --- ТОЧКА ВХОДА ---
+async def main():
+    await bot.delete_webhook(drop_pending_updates=False) 
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logging.info("База данных готова.")
+    asyncio.create_task(cleanup_db())
+    asyncio.create_task(reminder_worker())
+    logging.info("Запуск бота...")
+    try: await dp.start_polling(bot)
+    except Exception: logging.exception("Критическая ошибка")
+    finally:
+        await client.close()
+        await engine.dispose()
+
+if __name__ == "__main__":
+    asyncio.run(main())
