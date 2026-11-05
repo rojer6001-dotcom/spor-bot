@@ -341,6 +341,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             safe_history = truncate_history(history[-4:]) 
             
             if image_b64:
+                logging.info("ОТПРАВЛЯЮ ЗАПРОС С КАРТИНКОЙ (VISION)...")
                 messages = [{"role": "system", "content": agent["prompt"]}]
                 for h in safe_history:
                     messages.append(h)
@@ -351,8 +352,9 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                 })
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-4o" # Используем стандартную Vision-модель
+                model_to_use = "gpt-4o" 
             else:
+                logging.info("ОТПРАВЛЯЮ ТЕКСТОВЫЙ ЗАПРОС...")
                 messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
                 messages.append({"role": "user", "content": final_text})
                 model_to_use = agent["model"]
@@ -428,17 +430,19 @@ async def handle_photo(message: types.Message):
     key = (chat_id, user_id)
 
     try:
+        logging.info("СКАЧИВАЮ ФОТО...")
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         buffer = io.BytesIO()
         await bot.download_file(file.file_path, destination=buffer)
         
+        logging.info("КОДИРУЮ В BASE64...")
         img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         caption = message.caption or "Что на этой картинке? Опиши."
         is_forwarded = message.forward_origin is not None
         
-        async with user_locks[key]:
-            await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
+        # ВАЖНО: Убрали async with user_locks[key]: отсюда, так как она есть внутри process_aggregated_text
+        await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
             
     except Exception as e:
         logging.exception("Photo download error")
