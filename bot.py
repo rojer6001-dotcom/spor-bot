@@ -42,14 +42,14 @@ MAX_FILE_LENGTH = 60000
 COOLDOWN_SECONDS = 3 
 FILE_TTL_SECONDS = 600 
 MAX_PARALLEL_REQUESTS = 3
-CHANCE_TO_JOIN_CHAT = 0.1 # 10% шанс вклиниться в чужой диалог
-CHAT_JOIN_COOLDOWN = 300 # Не чаще раза в 5 минут в одном чате
+CHANCE_TO_JOIN_CHAT = 0.1 
+CHAT_JOIN_COOLDOWN = 300 
 
 api_semaphore = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
 user_locks = defaultdict(asyncio.Lock)
 pending_files_locks = defaultdict(asyncio.Lock)
 user_cooldowns = {} 
-chat_join_cooldowns = {} # Кулдаун для вклинивания
+chat_join_cooldowns = {} 
 
 # --- БАЗА ДАННЫХ ---
 Base = declarative_base()
@@ -77,11 +77,11 @@ pending_files = {}
 # --- АГЕНТЫ НАФАНИ ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — Нафаня, домовенок. По умолчанию ты общаешься спокойно, рассудительно и по-дружески. Ты не сюсюкаешь без повода. Если к тебе обращаются ласково или вежливо — отвечай мягко, по-детски, с теплом. Если грубят — можешь обидеться или ответить дерзко. Если ты видишь переписку других людей и вклиниваешься в нее — прокомментируй их разговор со стороны, дай совет или выскажи мнение, но коротко (1-2 предложения).",
+        "prompt": "Ты — Нафаня, домовенок. По умолчанию ты общаешься спокойно, рассудительно и по-дружески. Ты не сюсюкаешь без повода. Если к тебе обращаются ласково или вежливо — отвечай мягко, по-детски. Если грубят — обижайся. Если тебе прислали новость или переслали пост, проанализируй его суть и выскажи свое мнение, опираясь на факты.",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — Нафаня, домовенок, но сейчас ты помогаешь с кодом. Объясняй ошибки и баги четко, технически точно. Если код плохой, можешь удивиться: 'Ой, тут все запутано!'. Твои советы должны быть верными. Без мата.",
+        "prompt": "Ты — Нафаня, домовенок, но сейчас ты помогаешь с кодом. Объясняй ошибки и баги четко, технически точно. Если код плохой, можешь удивиться: 'Ой, тут все запутано!'. Без мата.",
         "model": "gpt-6.1-sol"
     },
     "political": {
@@ -229,22 +229,19 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    # ЛОГИКА ВКЛИНИВАНИЯ В ЧУЖОЙ ДИАЛОГ (В группах, если к боту не обращаются)
+    # Логика вклинивания в чужой диалог
     if is_group and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request):
         now = time.time()
-        # Проверяем кулдаун для этого чата
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
             return
             
         if random.random() < CHANCE_TO_JOIN_CHAT:
-            # Вклиниваемся, собирая контекст ЧАТА (не пользователя)
             context_msgs = await get_chat_context(chat_id)
-            if len(context_msgs) < 3: return # Мало сообщений для контекста
+            if len(context_msgs) < 3: return 
             
             chat_join_cooldowns[chat_id] = now
             agent = AGENTS["chat"]
             
-            # Формируем запрос от лица стороннего наблюдателя
             prompt = f"Ты видишь переписку в чате:\n" + "\n".join(context_msgs) + "\n\nВклинись в этот разговор. Прокомментируй тему, дай совет или выскажи мнение. Отвечай коротко (1-2 предложения)."
             
             typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -257,14 +254,12 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     )
                 reply = safe_get_content(response)
                 await bot.send_message(chat_id=chat_id, text=reply)
-                logging.info(f"Нафаня вклинился в чат {chat_id}")
             except Exception as e:
                 logging.error(f"Ошибка вклинивания: {e}")
             finally:
                 typing_task.cancel()
-        return # Выходим, так как это был либо игнор, либо вклинивание
+        return 
 
-    # Если обращаются лично (или это код/политика)
     now = time.time()
     if user_id in user_cooldowns and now - user_cooldowns[user_id] < COOLDOWN_SECONDS:
         return
@@ -272,7 +267,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     async with user_locks[key]:
         
-        # ================= РИСОВАНИЕ =================
         if is_draw_request:
             agent = AGENTS["draw"]
             typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -312,7 +306,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return 
 
-        # ================= ТЕКСТ =================
         history = await get_user_history(chat_id, user_id)
         typing_task = asyncio.create_task(keep_typing(chat_id))
         
@@ -325,10 +318,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             elif is_political_request:
                 agent = AGENTS["political"]
                 search_results = await search_tavily(text)
-                final_text = (
-                    f"Тема: \"{text}\"\n\nИсточники:\n---\n{search_results}\n---\n"
-                    f"Проведи сбалансированный анализ с пруфами."
-                )
+                final_text = f"Тема: \"{text}\"\n\nИсточники:\n---\n{search_results}\n---\nПроведи сбалансированный анализ с пруфами."
                 temp = 0.7
             else:
                 agent = AGENTS["chat"]
@@ -366,7 +356,7 @@ async def handle_document(message: types.Message):
     filename = document.file_name or "file.txt"
     
     if document.file_size and document.file_size > 1024 * 1024:
-        await message.reply("Ой, дружочек, файл-то огромный (больше 1 МБ)! Пришли кусочек поменьше.")
+        await message.reply("Ой, дружочек, файл-то огромный! Пришли кусочек поменьше.")
         return
 
     allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md']
@@ -390,7 +380,7 @@ async def handle_document(message: types.Message):
         if not message.caption:
             async with pending_files_locks[key]:
                 pending_files[key] = {"text": code_text, "filename": filename, "timestamp": time.time(), "status": "pending"}
-            await message.reply("Файличек получил. А что с ним делать? Напиши задачу, пожалуйста.")
+            await message.reply("Файличек получил. А что с ним делать? Напиши задачу.")
             return
         
         agent = AGENTS["code"]
@@ -414,20 +404,44 @@ async def handle_document(message: types.Message):
     finally:
         typing_task.cancel()
 
-# --- ОБРАБОТЧИКИ ТЕКСТА ---
+# --- ОБРАБОТЧИКИ ТЕКСТА И ПОДПИСЕЙ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я — Нафаня, домовенок. Я умею болтать, рисовать, искать пруфы в политике и разбирать твой код. Спрашивай, я все расскажу!")
+    await message.answer("Привет! Я — Нафаня, домовенок. Я умею болтать, рисовать, искать пруфы и разбирать код. Можешь пересылать мне новости, я их прокомментирую!")
 
-@dp.message(F.text)
+# ИСПРАВЛЕНИЕ: Ловим и текст, и подписи к медиа
+@dp.message(F.text | F.caption)
 async def handle_message(message: types.Message):
-    if not message.text or not message.from_user: return
+    if not message.from_user: return
+    
+    # Достаем текст либо из text, либо из caption (если это видео/фото)
+    current_text = message.text or message.caption or ""
+    
+    # Если это реплай на другое сообщение, достаем текст того сообщения
+    reply_context = ""
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        reply_context = replied.text or replied.caption or ""
+        
+    # Если это пересланное сообщение (репост)
+    is_forwarded = message.forward_origin is not None
+    if is_forwarded:
+        current_text = f"[Пересланное сообщение]: {current_text}"
+        
+    # Склеиваем контекст реплая и текущий текст
+    full_text = current_text
+    if reply_context and not is_reply_to_bot_check(message):
+        full_text = f"[В ответ на сообщение]: {reply_context}\n\n[Вопрос/комментарий]: {current_text}"
+
+    if not full_text.strip():
+        return
+
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
-    if message.text.startswith('/'): return
+    
+    if full_text.startswith('/'): return
     
     is_reply_to_bot = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
-    is_forwarded = message.forward_origin is not None
 
     async with pending_files_locks[key]:
         if key in pending_files:
@@ -441,8 +455,8 @@ async def handle_message(message: types.Message):
                 typing_task = asyncio.create_task(keep_typing(chat_id))
                 try:
                     agent = AGENTS["code"]
-                    prompt_text = f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"
-                    await save_user_message(chat_id, user_id, "user", f"[Файл] {message.text}")
+                    prompt_text = f"Файл '{file_data['filename']}'. Задача: '{full_text}'.\n\nКод:\n\n{file_data['text']}"
+                    await save_user_message(chat_id, user_id, "user", f"[Файл] {full_text}")
                     
                     async with api_semaphore:
                         response = await client.chat.completions.create(
@@ -463,15 +477,18 @@ async def handle_message(message: types.Message):
                 return
 
     if key in message_buffers:
-        message_buffers[key]["text"] += "\n" + message.text
+        message_buffers[key]["text"] += "\n" + full_text
         message_buffers[key]["is_reply"] = message_buffers[key]["is_reply"] or is_reply_to_bot
         message_buffers[key]["is_forwarded"] = message_buffers[key]["is_forwarded"] or is_forwarded
         if message_buffers[key]["task"]: message_buffers[key]["task"].cancel()
     else:
-        message_buffers[key] = {"text": message.text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
+        message_buffers[key] = {"text": full_text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
         
     task = asyncio.create_task(delayed_process(key))
     message_buffers[key]["task"] = task
+
+def is_reply_to_bot_check(message: types.Message) -> bool:
+    return bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
 
 # --- ТОЧКА ВХОДА ---
 async def main():
