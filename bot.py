@@ -1,4 +1,5 @@
 import os
+import re
 import logging
 import random
 import asyncio
@@ -75,18 +76,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ ---
+# --- АГЕНТЫ (С именем Нафаня и указанием использовать Markdown) ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — полезный и дружелюбный ИИ-помощник. Общайся обычным, живым языком, без лишних сюсюканий. Отвечай на вопросы кратко и по существу. Если пользователь просто болтает, поддержи беседу. Если тебе переслали новость или фото, выскажи свое мнение коротко (1-2 предложения).",
+        "prompt": "Ты — Нафаня. Твое имя — Нафаня. Если тебя спросят, как тебя зовут, отвечай, что тебя зовут Нафаня. Общайся обычным, живым языком. Отвечай кратко. Для выделения важных слов используй **жирный шрифт**.",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Пиши только то, что поможет решить проблему.",
+        "prompt": "Ты — Нафаня, опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Пиши только то, что поможет решить проблему. Твое имя — Нафаня.",
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "prompt": "Ты — аналитик. Дай краткую и объективную оценку политической новости. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи, если пользователь прямо не попросил 'разверни' или 'приведи пруфы'.",
+        "prompt": "Ты — Нафаня, аналитик. Дай краткую и объективную оценку политической новости. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи, если пользователь прямо не попросил 'разверни' или 'приведи пруфы'. Твое имя — Нафаня.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
@@ -164,24 +165,25 @@ async def keep_typing(chat_id: int):
     except asyncio.CancelledError:
         pass
 
-# ИСПРАВЛЕННАЯ ФУНКЦИЯ ОТПРАВКИ
+# НАДЕЖНАЯ ОТПРАВКА: Конвертируем Markdown в HTML
 async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
-    max_length = 4000
     
-    # Разбиваем на куски, если текст слишком длинный
+    # Конвертируем стандартный markdown в HTML для Telegram
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
+    
+    max_length = 4000
     chunks = [text[i:i+max_length] for i in range(0, len(text), max_length)]
     
     for chunk in chunks:
         try:
-            # Пытаемся отправить с Markdown (чтобы работали **жирный** и `код`)
-            await message.reply(chunk, parse_mode="Markdown")
+            await message.reply(chunk, parse_mode="HTML")
         except Exception as e:
-            # Если нейросеть ошиблась в разметке (например, забыла закрыть звездочку), 
-            # Telegram выдаст ошибку. В этом случае отправляем как обычный текст.
-            logging.warning(f"Ошибка парсинга Markdown: {e}. Отправляю как обычный текст.")
-            await message.reply(chunk)
-        
+            logging.warning(f"Ошибка парсинга HTML: {e}. Отправляю как обычный текст.")
+            # Если HTML сломался, отправляем без тегов
+            clean_chunk = re.sub(r'<[^>]+>', '', chunk)
+            await message.reply(clean_chunk)
         await asyncio.sleep(0.5)
 
 def truncate_history(history: list, max_chars: int = 2000) -> list:
@@ -525,7 +527,7 @@ async def handle_document(message: types.Message):
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, а также понять твои голосовые или фото. Спрашивай.")
+    await message.answer("Привет! Меня зовут Нафаня. Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, а также понять твои голосовые или фото. Спрашивай.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
