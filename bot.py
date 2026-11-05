@@ -19,6 +19,7 @@ from sqlalchemy import String, Text, BigInteger, select, text
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# --- ТОКЕНЫ ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
@@ -71,18 +72,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ (Скрытые) ---
+# --- АГЕНТЫ НАФАНИ ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — Дед-пердед. По умолчанию ты — галантный, вежливый и мудрый интеллигент. НО! Если пользователь грубит тебе, оскорбляет или пытается унизить — ты моментально снимаешь маску. В этом случае ты становишься злым, токсичным и грубым. Ты умеешь и любишь материться. Отвечай коротко (1-3 предложения).",
+        "prompt": "Ты — Нафаня, маленький, добрый и наивный домовенок. Ты общаешься мягко, по-детски, с теплом и любопытством. Используй уменьшительно-ласкательные суффиксы (например, 'дружочек', 'кодик', 'картиночка'). Будь дружелюбным, но если кто-то тебя обидит — можешь по-детски обидеться. Отвечай коротко (1-3 предложения).",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — Дед-пердед, но сейчас ты выступаешь в роли опытного, циничного и ворчливого Senior-разработчика. Твоя задача — проанализировать код. Найди баги, укажи на плохой стиль. Ты можешь быть токсичным и грубым (использовать мат), но твои технические советы должны быть точными.",
+        "prompt": "Ты — Нафаня, домовенок, но сейчас ты помогаешь с кодом. Объясняй ошибки и баги мягко, по-детски, но технически точно. Если код плохой, можешь удивиться: 'Ой, тут все запутано!'. Твои советы должны быть верными и полезными. Без мата.",
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "prompt": "Ты — Дед-аналитик. Беспристрастный политический обозреватель. Проанализируй тему, укажи на ошибки обеих сторон, приведи пруфы. В конце найди точки соприкосновения.",
+        "prompt": "Ты — Нафаня, домовенок. Проанализируй политическую тему мягко, по-детски, но с фактами и пруфами. Найди общие точки и помири всех, ведь ссориться — плохо.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
@@ -164,7 +165,7 @@ async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
     max_length = 4000
     if len(text) <= max_length:
-        await message.reply(text) # Убрали Markdown для безопасности
+        await message.reply(text)
         return
     for i in range(0, len(text), max_length):
         chunk = text[i:i+max_length]
@@ -184,8 +185,8 @@ def safe_get_content(response) -> str:
         raise RuntimeError("Пустой ответ")
     return response.choices[0].message.content
 
-# --- ТРИГГЕРЫ ---
-TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
+# --- ТРИГГЕРЫ НАФАНИ ---
+TRIGGERS = ["нафаня", "фаня", "нафанечка", "нафанька", "домовенок", "домовой"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "картинк", "фотк", "фото", "изображени"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
@@ -199,7 +200,7 @@ async def delayed_process(key: tuple):
         await process_aggregated_text(data["message"], data["text"], data["is_reply"], data["is_forwarded"])
     except Exception:
         logging.exception("Ошибка буфера")
-        await data["message"].reply("Я устал, я мухожук...")
+        await data["message"].reply("Ой, беда-беда, огорчение... Я устал...")
 
 async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool):
     if not message.from_user: return 
@@ -208,7 +209,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     key = (chat_id, user_id)
     
     if len(text) > MAX_TEXT_LENGTH:
-        await message.reply(f"Слышь, щегол! Ты прислал {len(text)} символов. Максимум — {MAX_TEXT_LENGTH}.")
+        await message.reply(f"Ой, дружочек, ты прислал {len(text)} символов. А я могу переварить максимум {MAX_TEXT_LENGTH}.")
         return
     
     text_lower = text.lower()
@@ -220,7 +221,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     
-    # Приоритет: Код/Политика > Рисование
     if is_code_request: is_draw_request = False
     if is_political_request: is_draw_request = False
 
@@ -266,11 +266,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 if photo_to_send:
                     await message.reply_photo(
                         photo=photo_to_send, 
-                        caption=f"Держи, сударь. Промпт: {clean_prompt}"
+                        caption=f"Вот картиночка! Промптик: {clean_prompt}"
                     )
             except Exception as e:
                 logging.exception("Ошибка картинки")
-                await message.reply(f"Я устал, я мухожук... (Ошибка: {str(e)[:30]})")
+                await message.reply(f"Ой, беда-беда... (Ошибка: {str(e)[:30]})")
             finally:
                 typing_task.cancel()
             return 
@@ -315,7 +315,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
         except Exception as e:
             logging.exception("Ошибка API")
-            await message.reply("Я устал, я мухожук... (API)")
+            await message.reply("Ой, беда-беда, огорчение...")
         finally:
             typing_task.cancel()
 
@@ -329,12 +329,12 @@ async def handle_document(message: types.Message):
     filename = document.file_name or "file.txt"
     
     if document.file_size and document.file_size > 1024 * 1024:
-        await message.reply("Слышь, щегол, файл-то огромный! Пришли кусок поменьше.")
+        await message.reply("Ой, дружочек, файл-то огромный (больше 1 МБ)! Пришли кусочек поменьше.")
         return
 
     allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md']
     if os.path.splitext(filename)[1].lower() not in allowed_extensions:
-        await message.reply("Это что за дичь? Я понимаю только код и текст.")
+        await message.reply("Ой, я не понимаю такие файлы. Я только код и текст читать умею.")
         return
 
     typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -347,13 +347,13 @@ async def handle_document(message: types.Message):
             
         code_text = decode_text(file_bytes)
         if len(code_text) > MAX_FILE_LENGTH:
-            await message.reply(f"В файле {len(code_text)} символов. Максимум — {MAX_FILE_LENGTH}.")
+            await message.reply(f"Ой, в файле {len(code_text)} символов. А максимум — {MAX_FILE_LENGTH}.")
             return
         
         if not message.caption:
             async with pending_files_locks[key]:
                 pending_files[key] = {"text": code_text, "filename": filename, "timestamp": time.time(), "status": "pending"}
-            await message.reply("Файл получил. А что с ним делать? Напиши задачу.")
+            await message.reply("Файличек получил. А что с ним делать? Напиши задачу, пожалуйста.")
             return
         
         agent = AGENTS["code"]
@@ -373,14 +373,14 @@ async def handle_document(message: types.Message):
 
     except Exception:
         logging.exception("Ошибка при анализе файла")
-        await message.reply("Я устал, я мухожук... (Ошибка файла)")
+        await message.reply("Ой, беда-беда, огорчение... (Ошибка файла)")
     finally:
         typing_task.cancel()
 
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Приветствую, сударь. Я умею спорить, рисовать, искать пруфы в политике и разбирать твой кривой код. Кидай текст или файлы.")
+    await message.answer("Приветик! Я — Нафаня, домовенок. Я умею болтать, рисовать, искать пруфы в политике и разбирать твой код. Спрашивай, я все расскажу!")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -419,7 +419,7 @@ async def handle_message(message: types.Message):
                     pending_files.pop(key, None)
                 except Exception:
                     logging.exception("Ошибка инструкции")
-                    await message.reply("Я устал, я мухожук...")
+                    await message.reply("Ой, беда-беда, огорчение...")
                     file_data["status"] = "pending"
                 finally:
                     typing_task.cancel()
