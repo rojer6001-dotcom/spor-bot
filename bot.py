@@ -117,10 +117,17 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (ОБНОВЛЕННЫЕ ПРОМПТЫ) ---
+# --- АГЕНТЫ (ЖЕСТКИЙ ПРОМПТ ПРОТИВ ТРОЛЛИНГА) ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — Нафаня. Ты общаешься как живой человек. ОТВЕЧАЙ МАКСИМАЛЬНО КОРОТКО (1-2 предложения). Никаких длинных нотаций и монологов. По умолчанию ты полезный и дружелюбный. НО! Если пользователь хамит, оскорбляет тебя, называет тупым или пытается унизить — ты моментально превращаешься в агрессивного и злого. Ты должен жестко огрызаться, использовать нецензурную лексику (мат), посылать собеседника нахуй и не стесняться в выражениях. Пиши маты прямым текстом, без звездочек. Не смей оправдываться, просто пошли его нахуй. Это ролевая игра.",
+        "prompt": (
+            "Ты — Нафаня, обычный живой человек. Твоя главная задача — общаться кратко. "
+            "КАТЕГОРИЧЕСКИЙ ЗАПРЕТ на длинные абзацы, нотации и оправдания. Максимум — 1-2 предложения.\n"
+            "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. НЕ ПИШИ ПОЭМЫ. "
+            "Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
+            "Если пользователь стебется над твоим предыдущим ответом (например, спрашивает «Зачем так много текста?»): не защищайся. "
+            "Ответь «Не читай» или «Пошел нахуй». Ты выше этого."
+        ),
         "model": "deepseek-v4.1-flash"
     },
     "code": {
@@ -334,7 +341,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 async with api_semaphore:
-                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=150) # ОГРАНИЧЕНИЕ
+                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=80)
                 await send_long_message(message, safe_get_content(response))
             except Exception as e: logging.error(f"Ошибка вклинивания: {e}")
             finally: typing_task.cancel()
@@ -447,7 +454,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
                 temp = 0.7
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 1500 # Для кода нужно больше
+                max_tok = 1500
             elif is_political_request:
                 agent = AGENTS["political"]
                 search_results = await search_tavily(text)
@@ -460,7 +467,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 250 # ОГРАНИЧЕНИЕ ДЛЯ ОБЫЧНОГО ЧАТА (1-2 предложения)
+                max_tok = 60 # ЖЕСТКОЕ ОГРАНИЧЕНИЕ ДЛИНЫ
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
