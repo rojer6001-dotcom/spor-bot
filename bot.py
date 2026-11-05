@@ -8,6 +8,7 @@ import codecs
 import time
 import io
 import httpx
+from datetime import datetime
 from collections import defaultdict
 from difflib import get_close_matches
 from aiogram import Bot, Dispatcher, types, F
@@ -76,7 +77,7 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ (С именем Нафаня и указанием использовать Markdown) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": "Ты — Нафаня. Твое имя — Нафаня. Если тебя спросят, как тебя зовут, отвечай, что тебя зовут Нафаня. Общайся обычным, живым языком. Отвечай кратко. Для выделения важных слов используй **жирный шрифт**.",
@@ -165,11 +166,9 @@ async def keep_typing(chat_id: int):
     except asyncio.CancelledError:
         pass
 
-# НАДЕЖНАЯ ОТПРАВКА: Конвертируем Markdown в HTML
 async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
     
-    # Конвертируем стандартный markdown в HTML для Telegram
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
     text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
     
@@ -181,7 +180,6 @@ async def send_long_message(message: types.Message, text: str):
             await message.reply(chunk, parse_mode="HTML")
         except Exception as e:
             logging.warning(f"Ошибка парсинга HTML: {e}. Отправляю как обычный текст.")
-            # Если HTML сломался, отправляем без тегов
             clean_chunk = re.sub(r'<[^>]+>', '', chunk)
             await message.reply(clean_chunk)
         await asyncio.sleep(0.5)
@@ -239,7 +237,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     
-    # ВАЖНО: Если есть картинка (image_b64), мы НЕ запускаем генерацию новой картинки
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not image_b64
     
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
@@ -264,7 +261,9 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             chat_join_cooldowns[chat_id] = now
             agent = AGENTS["chat"]
             
-            prompt = f"Ты видишь переписку в чате:\n" + "\n".join(context_msgs) + "\n\nВклинись в этот разговор. Прокомментируй тему, дай совет или выскажи мнение. Отвечай коротко (1-2 предложения)."
+            # Добавляем текущую дату в контекст при вклинивании
+            current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+            prompt = f"Текущее время: {current_time}.\nТы видишь переписку в чате:\n" + "\n".join(context_msgs) + "\n\nВклинись в этот разговор. Прокомментируй тему, дай совет или выскажи мнение. Отвечай коротко (1-2 предложения)."
             
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
@@ -332,10 +331,15 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         typing_task = asyncio.create_task(keep_typing(chat_id))
         
         try:
+            # Получаем текущую дату и время
+            current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+            time_context = f"\n\nВажная информация: Текущая дата и время — {current_time}."
+
             if is_code_request:
                 agent = AGENTS["code"]
                 final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
                 temp = 0.7
+                active_prompt = agent["prompt"] + time_context
                 
             elif is_political_request:
                 agent = AGENTS["political"]
@@ -346,17 +350,19 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     f"Дай КРАТКИЙ ответ на вопрос пользователя (1-3 предложения). Если он просит подробностей, тогда разверни анализ."
                 )
                 temp = 0.7
+                active_prompt = agent["prompt"] + time_context
             else:
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.7 if image_b64 else 0.85
+                active_prompt = agent["prompt"] + time_context
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
             
             if image_b64:
                 logging.info("ОТПРАВЛЯЮ ЗАПРОС С КАРТИНКОЙ (VISION)...")
-                messages = [{"role": "system", "content": agent["prompt"]}]
+                messages = [{"role": "system", "content": active_prompt}]
                 for h in safe_history:
                     messages.append(h)
                 
@@ -369,7 +375,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 model_to_use = "gpt-6.1-sol" 
             else:
                 logging.info("ОТПРАВЛЯЮ ТЕКСТОВЫЙ ЗАПРОС...")
-                messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
+                messages = [{"role": "system", "content": active_prompt}] + safe_history
                 messages.append({"role": "user", "content": final_text})
                 model_to_use = agent["model"]
 
@@ -504,13 +510,14 @@ async def handle_document(message: types.Message):
             return
         
         agent = AGENTS["code"]
+        current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
         prompt_text = f"Файл '{filename}'. Задача: '{message.caption}'.\n\nКод:\n\n{code_text}"
         await save_user_message(chat_id, user_id, "user", f"[Файл: {filename}] Задача: {message.caption}")
         
         async with api_semaphore:
             response = await client.chat.completions.create(
                 model=agent["model"],
-                messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt_text}],
+                messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время: {current_time}"}, {"role": "user", "content": prompt_text}],
                 temperature=0.7
             )
         
@@ -552,13 +559,14 @@ async def handle_message(message: types.Message):
                 typing_task = asyncio.create_task(keep_typing(chat_id))
                 try:
                     agent = AGENTS["code"]
+                    current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
                     prompt_text = f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"
                     await save_user_message(chat_id, user_id, "user", f"[Файл] {message.text}")
                     
                     async with api_semaphore:
                         response = await client.chat.completions.create(
                             model=agent["model"],
-                            messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt_text}],
+                            messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время: {current_time}"}, {"role": "user", "content": prompt_text}],
                             temperature=0.7
                         )
                     bot_reply = safe_get_content(response)
