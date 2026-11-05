@@ -77,15 +77,15 @@ pending_files = {}
 # --- АГЕНТЫ НАФАНИ (ОБНОВЛЕННЫЕ) ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — Нафаня, домовенок. Общайся спокойно и по-дружески. Отвечай кратко (1-3 предложения). Если тебе переслали новость или задали вопрос, сначала дай короткую оценку. Подробно расписывай только если пользователь прямо попросит 'расскажи подробнее' или 'объясни'. Не сюсюкай без повода.",
+        "prompt": "Ты — полезный и дружелюбный ИИ-помощник. Общайся обычным, живым языком, без лишних сюсюканий и сказочных оборотов. Отвечай на вопросы кратко и по существу. Если пользователь просто болтает, поддержи беседу. Если тебе переслали новость, выскажи свое мнение коротко (1-2 предложения), без длинных отчетов.",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — Нафаня, домовенок, но сейчас ты помогаешь с кодом. Объясняй ошибки и баги четко, технически точно. Если код плохой, можешь удивиться: 'Ой, тут все запутано!'. Без мата. Не пиши лишнего, только по делу.",
+        "prompt": "Ты — опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Если код плохой, можешь указать на это, но без оскорблений. Пиши только то, что поможет решить проблему.",
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "prompt": "Ты — Нафаня, домовенок-аналитик. Твоя главная задача — дать краткую оценку политической новости или ситуации. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи и таблицы, если пользователь прямо не попросил 'разверни', 'приведи пруфы' или 'расскажи подробнее'. Если просят пруфы — приводи их кратко.",
+        "prompt": "Ты — аналитик. Твоя задача — дать краткую и объективную оценку политической новости или ситуации. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи и таблицы, если пользователь прямо не попросил 'разверни', 'приведи пруфы' или 'расскажи подробнее'.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
@@ -195,7 +195,6 @@ TRIGGERS = ["нафаня", "фаня", "нафанечка", "нафанька"
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "картинк", "фотк", "фото", "изображени"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
-# Добавили триггеры для запроса подробностей
 DETAIL_TRIGGERS = ["подробнее", "разверни", "расскажи больше", "приведи пруфы", "обоснуй", "детали"]
 
 # --- ОСНОВНАЯ ЛОГИКА ---
@@ -207,7 +206,7 @@ async def delayed_process(key: tuple):
         await process_aggregated_text(data["message"], data["text"], data["is_reply"], data["is_forwarded"])
     except Exception:
         logging.exception("Ошибка буфера")
-        await data["message"].reply("Ой, беда-беда, огорчение...")
+        await data["message"].reply("Что-то пошло не так. Попробуй еще раз.")
 
 async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool):
     if not message.from_user: return 
@@ -216,7 +215,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     key = (chat_id, user_id)
     
     if len(text) > MAX_TEXT_LENGTH:
-        await message.reply(f"Ой, дружочек, ты прислал {len(text)} символов. Максимум — {MAX_TEXT_LENGTH}.")
+        await message.reply(f"Слишком длинный текст ({len(text)} символов). Максимум — {MAX_TEXT_LENGTH}.")
         return
     
     text_lower = text.lower()
@@ -229,7 +228,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     
-    # Если просят подробностей, отключаем блокировку рисования
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
     
     if is_code_request: is_draw_request = False
@@ -305,11 +303,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 if photo_to_send:
                     await message.reply_photo(
                         photo=photo_to_send, 
-                        caption=f"Вот картиночка! Промптик: {clean_prompt}"
+                        caption=f"Вот что получилось. Промпт: {clean_prompt}"
                     )
             except Exception as e:
                 logging.exception("Ошибка картинки")
-                await message.reply(f"Ой, беда-беда... (Ошибка: {str(e)[:30]})")
+                await message.reply(f"Не получилось сгенерировать картинку. Ошибка: {str(e)[:30]}")
             finally:
                 typing_task.cancel()
             return 
@@ -354,7 +352,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
         except Exception as e:
             logging.exception("Ошибка API")
-            await message.reply("Ой, беда-беда, огорчение...")
+            await message.reply("Ошибка при обращении к нейросети. Попробуйте позже.")
         finally:
             typing_task.cancel()
 
@@ -368,12 +366,12 @@ async def handle_document(message: types.Message):
     filename = document.file_name or "file.txt"
     
     if document.file_size and document.file_size > 1024 * 1024:
-        await message.reply("Ой, дружочек, файл-то огромный! Пришли кусочек поменьше.")
+        await message.reply("Файл слишком большой (больше 1 МБ). Пришлите поменьше.")
         return
 
     allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md']
     if os.path.splitext(filename)[1].lower() not in allowed_extensions:
-        await message.reply("Ой, я не понимаю такие файлы. Я только код и текст читать умею.")
+        await message.reply("Я понимаю только код и текст. Поддерживаемые форматы: py, txt, js, ts, html, css, json, md.")
         return
 
     typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -386,13 +384,13 @@ async def handle_document(message: types.Message):
             
         code_text = decode_text(file_bytes)
         if len(code_text) > MAX_FILE_LENGTH:
-            await message.reply(f"Ой, в файле {len(code_text)} символов. А максимум — {MAX_FILE_LENGTH}.")
+            await message.reply(f"В файле {len(code_text)} символов, а максимум — {MAX_FILE_LENGTH}.")
             return
         
         if not message.caption:
             async with pending_files_locks[key]:
                 pending_files[key] = {"text": code_text, "filename": filename, "timestamp": time.time(), "status": "pending"}
-            await message.reply("Файличек получил. А что с ним делать? Напиши задачу.")
+            await message.reply("Файл получен. Что с ним сделать? Напиши задачу.")
             return
         
         agent = AGENTS["code"]
@@ -412,14 +410,14 @@ async def handle_document(message: types.Message):
 
     except Exception:
         logging.exception("Ошибка при анализе файла")
-        await message.reply("Ой, беда-беда, огорчение... (Ошибка файла)")
+        await message.reply("Не удалось прочитать файл. Возможно, он поврежден.")
     finally:
         typing_task.cancel()
 
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я — Нафаня, домовенок. Я умею болтать, рисовать, искать пруфы и разбирать код. Можешь пересылать мне новости, я их прокомментирую!")
+    await message.answer("Привет! Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию в интернете или сгенерировать картинку. Спрашивай.")
 
 @dp.message(F.text | F.caption)
 async def handle_message(message: types.Message):
@@ -477,7 +475,7 @@ async def handle_message(message: types.Message):
                     pending_files.pop(key, None)
                 except Exception:
                     logging.exception("Ошибка инструкции")
-                    await message.reply("Ой, беда-беда, огорчение...")
+                    await message.reply("Ошибка при обработке файла.")
                     file_data["status"] = "pending"
                 finally:
                     typing_task.cancel()
