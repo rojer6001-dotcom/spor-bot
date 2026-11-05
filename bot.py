@@ -158,17 +158,19 @@ async def get_active_reminders(chat_id: int, user_id: int) -> list:
 async def delete_reminders_by_query(chat_id: int, user_id: int, text_query: str = None):
     async with async_session() as session:
         if text_query:
-            # Удаляем по частичному совпадению текста
-            await session.execute(
-                text("DELETE FROM reminders WHERE chat_id = :chat_id AND user_id = :user_id AND text LIKE :text_query"),
-                {"chat_id": chat_id, "user_id": user_id, "text_query": f"%{text_query}%"}
+            stmt = select(Reminder).where(
+                Reminder.chat_id == chat_id, 
+                Reminder.user_id == user_id,
+                Reminder.text.ilike(f"%{text_query}%")
             )
+            result = await session.execute(stmt)
+            for rem in result.scalars().all():
+                await session.delete(rem)
         else:
-            # Удаляем все
-            await session.execute(
-                text("DELETE FROM reminders WHERE chat_id = :chat_id AND user_id = :user_id"),
-                {"chat_id": chat_id, "user_id": user_id}
-            )
+            stmt = select(Reminder).where(Reminder.chat_id == chat_id, Reminder.user_id == user_id)
+            result = await session.execute(stmt)
+            for rem in result.scalars().all():
+                await session.delete(rem)
         await session.commit()
 
 async def cleanup_db():
@@ -219,7 +221,6 @@ async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
     
     formatted_text = format_text(text)
-    
     max_length = 4000
     chunks = [formatted_text[i:i+max_length] for i in range(0, len(formatted_text), max_length)]
     
@@ -327,7 +328,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_reminder_list = any(trigger in text_lower for trigger in REMINDER_LIST_TRIGGERS)
     is_reminder_delete = any(trigger in text_lower for trigger in REMINDER_DELETE_TRIGGERS)
 
-    # Приоритет: Удаление > Список > Создание
     if is_reminder_delete or is_reminder_list:
         is_reminder_create = False
     
@@ -336,6 +336,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
+    # Логика вклинивания в чужой диалог
     if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
@@ -374,8 +375,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     async with user_locks[key]:
         
-        # --- ЛОГИКА СПИСКА НАПОМИНАНИЙ ---
         if is_reminder_list:
+            # ... (без изменений)
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 reminders = await get_active_reminders(chat_id, user_id)
@@ -396,8 +397,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return
 
-        # --- ЛОГИКА УДАЛЕНИЯ НАПОМИНАНИЙ ---
         if is_reminder_delete:
+            # ... (без изменений)
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 current_time = get_moscow_time()
@@ -442,8 +443,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return
 
-        # --- ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЯ ---
         if is_reminder_create:
+            # ... (без изменений)
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 current_time = get_moscow_time()
@@ -469,7 +470,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 data = json.loads(raw_json)
                 
                 if "error" in data:
-                    await message.reply("Я не понял, на какое время ставить напоминание. Уточни, пожалуйста (например: 'через 10 минут' или 'завтра в 15:00').")
+                    await message.reply("Я не понял, на какое время ставить напоминание. Уточни, пожалуйста.")
                     return
                     
                 rem_text = data["text"]
@@ -500,7 +501,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
         # --- ЛОГИКА РИСОВАНИЯ ---
         if is_draw_request:
-            # ... (без изменений) ...
             agent = AGENTS["draw"]
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
@@ -611,7 +611,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 # --- ОБРАБОТЧИК ГОЛОСОВЫХ ---
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
-    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕНО ГОЛОСОВОЕ ОТ {message.from_user.id} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
@@ -654,32 +653,61 @@ async def handle_voice(message: types.Message):
         if not typing_task.cancelled():
             typing_task.cancel()
 
-# --- ОБРАБОТЧИК ФОТО ---
+# --- ОБРАБОТЧИК ФОТО (НОВАЯ ЛОГИКА) ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕНО ФОТО ОТ {message.from_user.id} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
 
     try:
-        logging.info("СКАЧИВАЮ ФОТО...")
+        # Скачиваем фото
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         buffer = io.BytesIO()
         await bot.download_file(file.file_path, destination=buffer)
-        
-        logging.info("КОДИРУЮ В BASE64...")
         img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        caption = message.caption or "Что на этой картинке? Опиши."
-        is_forwarded = message.forward_origin is not None
         
-        await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
+        caption = message.caption
+        
+        if caption:
+            # Если есть подпись, обрабатываем как обычный запрос с картинкой
+            await process_aggregated_text(message, caption, is_reply_to_bot_check(message), message.forward_origin is not None, image_b64=img_b64)
+        else:
+            # Если подписи нет, бот "молча" смотрит на фото, запоминает его и ставит реакцию
+            logging.info("ФОТО БЕЗ ПОДПИСИ. Анализирую молча...")
+            
+            # Отправляем в Vision, чтобы получить описание
+            async with api_semaphore:
+                desc_prompt = "Опиши это изображение кратко (1-2 предложения), чтобы я мог запомнить контекст."
+                messages = [
+                    {"role": "system", "content": "Ты — ИИ-помощник."},
+                    {"role": "user", "content": [
+                        {"type": "text", "text": desc_prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
+                    ]}
+                ]
+                response = await client.chat.completions.create(
+                    model="gpt-6.1-sol",
+                    messages=messages,
+                    temperature=0.5
+                )
+            
+            description = safe_get_content(response)
+            
+            # Сохраняем это описание в историю диалога, чтобы бот мог ответить на следующий вопрос
+            await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем изображено: {description}]")
+            
+            # Ставим реакцию "Глаза" на сообщение пользователя, чтобы он понял, что бот его увидел
+            try:
+                await message.react([types.ReactionTypeEmoji(emoji="👀")])
+            except Exception:
+                pass # Если не получилось поставить реакцию, просто игнорируем
             
     except Exception as e:
-        logging.exception("Photo download error")
-        await message.reply(f"Не удалось скачать фото. Ошибка: {str(e)[:50]}")
+        logging.exception("Photo download/vision error")
+        await message.reply(f"Не удалось обработать фото. Ошибка: {str(e)[:50]}")
 
 # --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
@@ -753,7 +781,6 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
-    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕН ТЕКСТ ОТ {message.from_user.id}: {message.text[:50]} !!!")
     if not message.text or not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
@@ -811,13 +838,16 @@ async def handle_message(message: types.Message):
 # --- ТОЧКА ВХОДА ---
 async def main():
     await bot.delete_webhook(drop_pending_updates=False) 
+    
+    logging.info("Подключение к базе данных...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        logging.info("База данных готова.")
+    logging.info("База данных готова.")
 
     asyncio.create_task(cleanup_db())
     asyncio.create_task(reminder_worker())
     
+    logging.info("Запуск бота (polling)...")
     try:
         await dp.start_polling(bot)
     except Exception:
