@@ -320,7 +320,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     
-    # ЖЕСТКОЕ ПРАВИЛО: если есть картинка (image_b64), НИКАКОГО рисования новой
+    # ЖЕСТКОЕ ПРАВИЛО: если есть картинка, никакого рисования новой
     if image_b64:
         is_draw_request = False
     else:
@@ -541,7 +541,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return 
 
-        # --- ТЕКСТОВАЯ ЛОГИКА (VISION) ---
+        # --- ТЕКСТОВАЯ ЛОГИКА ---
         history = await get_user_history(chat_id, user_id)
         typing_task = asyncio.create_task(keep_typing(chat_id))
         
@@ -655,7 +655,7 @@ async def handle_voice(message: types.Message):
         if not typing_task.cancelled():
             typing_task.cancel()
 
-# --- ОБРАБОТЧИК ФОТО (НОВАЯ ЛОГИКА) ---
+# --- ОБРАБОТЧИК ФОТО ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     logging.info(f"!!! ПОЛУЧЕНО ФОТО ОТ {message.from_user.id} !!!")
@@ -677,10 +677,11 @@ async def handle_photo(message: types.Message):
         caption = message.caption
         
         if caption:
-            # Если есть подпись, передаем картинку и текст в общую логику
+            # Если есть подпись, обрабатываем как запрос с картинкой
             await process_aggregated_text(message, caption, is_reply_to_bot_check(message), message.forward_origin is not None, image_b64=img_b64)
         else:
-            # Если подписи нет, бот "молча" смотрит на фото, запоминает его и ставит реакцию
+            # Если подписи нет — бот "молча" смотрит на фото, запоминает его и ставит реакцию.
+            # В ЧАТ ОН НИЧЕГО НЕ ПИШЕТ.
             logging.info("ФОТО БЕЗ ПОДПИСИ. Анализирую молча...")
             
             async with api_semaphore:
@@ -699,8 +700,10 @@ async def handle_photo(message: types.Message):
                 )
             
             description = safe_get_content(response)
+            # Сохраняем в базу, чтобы бот знал контекст следующего вопроса
             await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем изображено: {description}]")
             
+            # Ставим реакцию, чтобы пользователь понял, что бот "увидел" фото
             try:
                 await message.react([types.ReactionTypeEmoji(emoji="👀")])
             except Exception:
@@ -858,3 +861,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
