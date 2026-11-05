@@ -75,7 +75,7 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ (Обычный разговорный стиль) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": "Ты — полезный и дружелюбный ИИ-помощник. Общайся обычным, живым языком, без лишних сюсюканий. Отвечай на вопросы кратко и по существу. Если пользователь просто болтает, поддержи беседу. Если тебе переслали новость или фото, выскажи свое мнение коротко (1-2 предложения).",
@@ -238,7 +238,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    # Логика вклинивания в чужой диалог
     if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
@@ -352,7 +351,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                 })
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-6.1-sol"
+                model_to_use = "gpt-6.1-sol" # Убедитесь, что эта модель поддерживает Vision
             else:
                 messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
                 messages.append({"role": "user", "content": final_text})
@@ -371,7 +370,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
         except Exception as e:
             logging.exception("Ошибка API")
-            await message.reply("Ошибка при обращении к нейросети. Попробуйте позже.")
+            # ВЫВОДИМ ОШИБКУ, ЧТОБЫ ПОНЯТЬ, ПОЧЕМУ УПАЛО
+            await message.reply(f"Ошибка при обработке: {str(e)[:150]}")
         finally:
             typing_task.cancel()
 
@@ -392,7 +392,7 @@ async def handle_voice(message: types.Message):
         
         async with api_semaphore:
             transcript = await client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",  # <-- ИСПРАВЛЕННАЯ МОДЕЛЬ
+                model="whisper-large-v3-turbo",
                 file=buffer
             )
         
@@ -425,27 +425,24 @@ async def handle_photo(message: types.Message):
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
-    
-    now = time.time()
-    if user_id in user_cooldowns and now - user_cooldowns[user_id] < COOLDOWN_SECONDS:
-        return
-    user_cooldowns[user_id] = now
 
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    buffer = io.BytesIO()
-    await bot.download_file(file.file_path, destination=buffer)
-    
-    img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-    caption = message.caption or "Что на этой картинке? Опиши."
-    is_forwarded = message.forward_origin is not None
-    
-    async with user_locks[key]:
-        try:
+    try:
+        photo = message.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        buffer = io.BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        
+        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+        caption = message.caption or "Что на этой картинке? Опиши."
+        is_forwarded = message.forward_origin is not None
+        
+        async with user_locks[key]:
+            # ВАЖНО: Убрали проверку кулдауна отсюда, так как она есть внутри process_aggregated_text
             await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
-        except Exception as e:
-            logging.error(f"Photo error: {e}")
-            await message.reply("Не удалось обработать фото.")
+            
+    except Exception as e:
+        logging.exception("Photo download error")
+        await message.reply(f"Не удалось скачать фото. Ошибка: {str(e)[:50]}")
 
 # --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
