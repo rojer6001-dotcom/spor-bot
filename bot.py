@@ -19,14 +19,14 @@ from sqlalchemy import String, Text, BigInteger, select, text
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- ТОКЕНЫ ---
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+# --- ТОКЕНЫ (Поддержка переменной BotHost и собственной) ---
+BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("API_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 if not BOT_TOKEN or not PLUSVIBE_API_KEY:
-    raise ValueError("❌ ОШИБКА: Не заданы BOT_TOKEN или PLUSVIBE_API_KEY!")
+    raise ValueError("❌ ОШИБКА: Не заданы BOT_TOKEN/API_TOKEN или PLUSVIBE_API_KEY!")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -72,7 +72,7 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ НАФАНИ ---
+# --- ПЕРСОНАЖИ (Промпты Нафани) ---
 AGENTS = {
     "chat": {
         "prompt": "Ты — Нафаня, маленький, добрый и наивный домовенок. Ты общаешься мягко, по-детски, с теплом и любопытством. Используй уменьшительно-ласкательные суффиксы (например, 'дружочек', 'кодик', 'картиночка'). Будь дружелюбным, но если кто-то тебя обидит — можешь по-детски обидеться. Отвечай коротко (1-3 предложения).",
@@ -185,7 +185,7 @@ def safe_get_content(response) -> str:
         raise RuntimeError("Пустой ответ")
     return response.choices[0].message.content
 
-# --- ТРИГГЕРЫ НАФАНИ ---
+# --- ТРИГГЕРЫ ---
 TRIGGERS = ["нафаня", "фаня", "нафанечка", "нафанька", "домовенок", "домовой"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "картинк", "фотк", "фото", "изображени"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
@@ -200,7 +200,7 @@ async def delayed_process(key: tuple):
         await process_aggregated_text(data["message"], data["text"], data["is_reply"], data["is_forwarded"])
     except Exception:
         logging.exception("Ошибка буфера")
-        await data["message"].reply("Ой, беда-беда, огорчение... Я устал...")
+        await data["message"].reply("Ой, беда-беда, огорчение...")
 
 async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool):
     if not message.from_user: return 
