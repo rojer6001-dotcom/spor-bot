@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import logging
 import random
 import asyncio
@@ -8,8 +9,7 @@ import codecs
 import time
 import io
 import httpx
-from datetime import datetime
-from zoneinfo import ZoneInfo  # <-- ДОБАВЛЕНО ДЛЯ МОСКОВСКОГО ВРЕМЕНИ
+from datetime import datetime, timedelta
 from collections import defaultdict
 from difflib import get_close_matches
 from aiogram import Bot, Dispatcher, types, F
@@ -19,7 +19,7 @@ from openai import AsyncOpenAI
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
-from sqlalchemy import String, Text, BigInteger, select, text
+from sqlalchemy import String, Text, BigInteger, select, text, DateTime
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -72,6 +72,14 @@ class ChatContext(Base):
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
     message_text: Mapped[str] = mapped_column(Text)
 
+class Reminder(Base):
+    __tablename__ = "reminders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    text: Mapped[str] = mapped_column(Text)
+    remind_time: Mapped[datetime] = mapped_column(DateTime, index=True)
+
 engine = create_async_engine("sqlite+aiosqlite:///bot_memory_v2.db", echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -80,8 +88,12 @@ pending_files = {}
 
 # --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВРЕМЕНИ ---
 def get_moscow_time():
-    """Возвращает текущее время по Москве в формате ДД.ММ.ГГГГ ЧЧ:ММ"""
-    return datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y %H:%M")
+    """Возвращает текущее время по Москве (UTC+3)"""
+    return (datetime.utcnow() + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
+
+def get_moscow_datetime_obj():
+    """Возвращает текущее время по Москве как объект datetime"""
+    return datetime.utcnow() + timedelta(hours=3)
 
 # --- АГЕНТЫ ---
 AGENTS = {
@@ -145,6 +157,11 @@ async def cleanup_db():
                         ) WHERE rn <= 50
                     )
                 """))
+                # Очистка старых напоминаний
+                await session.execute(
+                    text("DELETE FROM reminders WHERE remind_time < :now"), 
+                    {"now": get_moscow_datetime_obj()}
+                )
                 await session.commit()
         except Exception as e:
             logging.error(f"Ошибка очистки БД: {e}")
@@ -212,6 +229,36 @@ DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
 DETAIL_TRIGGERS = ["подробнее", "разверни", "расскажи больше", "приведи пруфы", "обоснуй", "детали"]
+REMINDER_TRIGGERS = ["напомни", "таймер", "напоминание"]
+
+# --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
+async def reminder_worker():
+    logging.info("Таймер напоминаний запущен.")
+    while True:
+        await asyncio.sleep(30) # Проверяем каждые 30 секунд
+        try:
+            now = get_moscow_datetime_obj()
+            async with async_session() as session:
+                # Ищем напоминания, время которых уже наступило
+                result = await session.execute(
+                    select(Reminder).where(Reminder.remind_time <= now)
+                )
+                reminders = result.scalars().all()
+                
+                for rem in reminders:
+                    try:
+                        await bot.send_message(
+                            chat_id=rem.chat_id,
+                            text=f"🔔 **Напоминаю:**\n{rem.text}"
+                        )
+                    except Exception as e:
+                        logging.error(f"Не удалось отправить напоминание в {rem.chat_id}: {e}")
+                    
+                    # Удаляем выполненное напоминание
+                    await session.delete(rem)
+                await session.commit()
+        except Exception as e:
+            logging.error(f"Ошибка в таймере напоминаний: {e}")
 
 # --- ОСНОВНАЯ ЛОГИКА ---
 async def delayed_process(key: tuple):
@@ -242,20 +289,18 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
-    
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not image_b64
-    
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
-    
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
+    is_reminder_request = any(trigger in text_lower for trigger in REMINDER_TRIGGERS)
     
     if is_code_request: is_draw_request = False
     if is_political_request: is_draw_request = False
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request):
+    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
             return
@@ -267,7 +312,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             chat_join_cooldowns[chat_id] = now
             agent = AGENTS["chat"]
             
-            # ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
             current_time = get_moscow_time()
             prompt = f"Текущее время: {current_time}.\nТы видишь переписку в чате:\n" + "\n".join(context_msgs) + "\n\nВклинись в этот разговор. Прокомментируй тему, дай совет или выскажи мнение. Отвечай коротко (1-2 предложения)."
             
@@ -294,6 +338,65 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     async with user_locks[key]:
         
+        # --- ЛОГИКА НАПОМИНАНИЯ ---
+        if is_reminder_request:
+            typing_task = asyncio.create_task(keep_typing(chat_id))
+            try:
+                current_time = get_moscow_time()
+                # Просим нейросеть распарсить запрос в JSON
+                parse_prompt = (
+                    f"Текущее время: {current_time} (Москва).\n"
+                    f"Пользователь просит: '{text}'.\n"
+                    f"Твоя задача — выделить текст напоминания и точное время.\n"
+                    f"Ответь СТРОГО в формате JSON без разметки: "
+                    f'{{"text": "что напомнить", "datetime_str": "YYYY-MM-DD HH:MM"}}\n'
+                    f"Если время не указано или его невозможно понять, верни: {{\"error\": \"no_time\"}}"
+                )
+                
+                async with api_semaphore:
+                    parse_response = await client.chat.completions.create(
+                        model="gpt-6.1-sol",
+                        messages=[{"role": "user", "content": parse_prompt}],
+                        temperature=0.1
+                    )
+                
+                raw_json = safe_get_content(parse_response).strip()
+                # Очищаем от возможных маркеров markdown
+                raw_json = re.sub(r'```json|```', '', raw_json).strip()
+                
+                data = json.loads(raw_json)
+                
+                if "error" in data:
+                    await message.reply("Я не понял, на какое время ставить напоминание. Уточни, пожалуйста (например: 'через 10 минут' или 'завтра в 15:00').")
+                    return
+                    
+                rem_text = data["text"]
+                rem_time_str = data["datetime_str"]
+                
+                rem_datetime = datetime.strptime(rem_time_str, "%Y-%m-%d %H:%M")
+                
+                if rem_datetime <= get_moscow_datetime_obj():
+                    await message.reply("Это время уже прошло. Назначь время в будущем.")
+                    return
+                
+                async with async_session() as session:
+                    session.add(Reminder(chat_id=chat_id, user_id=user_id, text=rem_text, remind_time=rem_datetime))
+                    await session.commit()
+                
+                # Красиво форматируем дату для ответа
+                formatted_time = rem_datetime.strftime("%d.%m.%Y в %H:%M")
+                await message.reply(f"Хорошо, напомню **{formatted_time}**:\n_{rem_text}_")
+                
+            except json.JSONDecodeError:
+                await message.reply("Произошла ошибка при разборе времени. Попробуй переформулировать.")
+            except Exception as e:
+                logging.error(f"Ошибка создания напоминания: {e}")
+                await message.reply(f"Не удалось создать напоминание. Ошибка: {str(e)[:50]}")
+            finally:
+                typing_task.cancel()
+            return
+
+        # --- ЛОГИКА РИСОВАНИЯ ---
         if is_draw_request:
             agent = AGENTS["draw"]
             typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -333,11 +436,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return 
 
+        # --- ТЕКСТОВАЯ ЛОГИКА ---
         history = await get_user_history(chat_id, user_id)
         typing_task = asyncio.create_task(keep_typing(chat_id))
         
         try:
-            # ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
             current_time = get_moscow_time()
             time_context = f"\n\nВажная информация: Текущая дата и время (по Москве) — {current_time}."
 
@@ -516,7 +619,7 @@ async def handle_document(message: types.Message):
             return
         
         agent = AGENTS["code"]
-        current_time = get_moscow_time() # <-- ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
+        current_time = get_moscow_time()
         prompt_text = f"Файл '{filename}'. Задача: '{message.caption}'.\n\nКод:\n\n{code_text}"
         await save_user_message(chat_id, user_id, "user", f"[Файл: {filename}] Задача: {message.caption}")
         
@@ -540,7 +643,7 @@ async def handle_document(message: types.Message):
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Меня зовут Нафаня. Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, а также понять твои голосовые или фото. Спрашивай.")
+    await message.answer("Привет! Меня зовут Нафаня. Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, понять твои голосовые или фото, а также установить напоминание. Спрашивай.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -565,7 +668,7 @@ async def handle_message(message: types.Message):
                 typing_task = asyncio.create_task(keep_typing(chat_id))
                 try:
                     agent = AGENTS["code"]
-                    current_time = get_moscow_time() # <-- ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
+                    current_time = get_moscow_time()
                     prompt_text = f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"
                     await save_user_message(chat_id, user_id, "user", f"[Файл] {message.text}")
                     
@@ -606,6 +709,7 @@ async def main():
         logging.info("База данных готова.")
 
     asyncio.create_task(cleanup_db())
+    asyncio.create_task(reminder_worker()) # <-- Запуск таймера напоминаний
     
     try:
         await dp.start_polling(bot)
