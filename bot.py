@@ -74,18 +74,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ НАФАНИ ---
+# --- АГЕНТЫ НАФАНИ (ОБНОВЛЕННЫЕ) ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — Нафаня, домовенок. По умолчанию ты общаешься спокойно, рассудительно и по-дружески. Ты не сюсюкаешь без повода. Если к тебе обращаются ласково или вежливо — отвечай мягко, по-детски. Если грубят — обижайся. Если тебе прислали новость или переслали пост, проанализируй его суть и выскажи свое мнение, опираясь на факты.",
+        "prompt": "Ты — Нафаня, домовенок. Общайся спокойно и по-дружески. Отвечай кратко (1-3 предложения). Если тебе переслали новость или задали вопрос, сначала дай короткую оценку. Подробно расписывай только если пользователь прямо попросит 'расскажи подробнее' или 'объясни'. Не сюсюкай без повода.",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — Нафаня, домовенок, но сейчас ты помогаешь с кодом. Объясняй ошибки и баги четко, технически точно. Если код плохой, можешь удивиться: 'Ой, тут все запутано!'. Без мата.",
+        "prompt": "Ты — Нафаня, домовенок, но сейчас ты помогаешь с кодом. Объясняй ошибки и баги четко, технически точно. Если код плохой, можешь удивиться: 'Ой, тут все запутано!'. Без мата. Не пиши лишнего, только по делу.",
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "prompt": "Ты — Нафаня, домовенок. Проанализируй политическую тему спокойно, с фактами и пруфами. Найди общие точки и помири всех.",
+        "prompt": "Ты — Нафаня, домовенок-аналитик. Твоя главная задача — дать краткую оценку политической новости или ситуации. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи и таблицы, если пользователь прямо не попросил 'разверни', 'приведи пруфы' или 'расскажи подробнее'. Если просят пруфы — приводи их кратко.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
@@ -187,11 +187,16 @@ def safe_get_content(response) -> str:
         raise RuntimeError("Пустой ответ")
     return response.choices[0].message.content
 
+def is_reply_to_bot_check(message: types.Message) -> bool:
+    return bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
+
 # --- ТРИГГЕРЫ ---
 TRIGGERS = ["нафаня", "фаня", "нафанечка", "нафанька", "домовенок", "домовой"]
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "картинк", "фотк", "фото", "изображени"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
+# Добавили триггеры для запроса подробностей
+DETAIL_TRIGGERS = ["подробнее", "разверни", "расскажи больше", "приведи пруфы", "обоснуй", "детали"]
 
 # --- ОСНОВНАЯ ЛОГИКА ---
 async def delayed_process(key: tuple):
@@ -224,13 +229,16 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     
+    # Если просят подробностей, отключаем блокировку рисования
+    is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
+    
     if is_code_request: is_draw_request = False
     if is_political_request: is_draw_request = False
 
     is_group = message.chat.type in ["group", "supergroup"]
     
     # Логика вклинивания в чужой диалог
-    if is_group and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request):
+    if is_group and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
             return
@@ -318,7 +326,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             elif is_political_request:
                 agent = AGENTS["political"]
                 search_results = await search_tavily(text)
-                final_text = f"Тема: \"{text}\"\n\nИсточники:\n---\n{search_results}\n---\nПроведи сбалансированный анализ с пруфами."
+                final_text = (
+                    f"Тема: \"{text}\"\n\n"
+                    f"Данные из поиска:\n---\n{search_results}\n---\n"
+                    f"Дай КРАТКИЙ ответ на вопрос пользователя (1-3 предложения). Если он просит подробностей, тогда разверни анализ."
+                )
                 temp = 0.7
             else:
                 agent = AGENTS["chat"]
@@ -404,31 +416,26 @@ async def handle_document(message: types.Message):
     finally:
         typing_task.cancel()
 
-# --- ОБРАБОТЧИКИ ТЕКСТА И ПОДПИСЕЙ ---
+# --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer("Привет! Я — Нафаня, домовенок. Я умею болтать, рисовать, искать пруфы и разбирать код. Можешь пересылать мне новости, я их прокомментирую!")
 
-# ИСПРАВЛЕНИЕ: Ловим и текст, и подписи к медиа
 @dp.message(F.text | F.caption)
 async def handle_message(message: types.Message):
     if not message.from_user: return
     
-    # Достаем текст либо из text, либо из caption (если это видео/фото)
     current_text = message.text or message.caption or ""
-    
-    # Если это реплай на другое сообщение, достаем текст того сообщения
     reply_context = ""
+    
     if message.reply_to_message:
         replied = message.reply_to_message
         reply_context = replied.text or replied.caption or ""
         
-    # Если это пересланное сообщение (репост)
     is_forwarded = message.forward_origin is not None
     if is_forwarded:
         current_text = f"[Пересланное сообщение]: {current_text}"
         
-    # Склеиваем контекст реплая и текущий текст
     full_text = current_text
     if reply_context and not is_reply_to_bot_check(message):
         full_text = f"[В ответ на сообщение]: {reply_context}\n\n[Вопрос/комментарий]: {current_text}"
@@ -441,7 +448,7 @@ async def handle_message(message: types.Message):
     
     if full_text.startswith('/'): return
     
-    is_reply_to_bot = bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
+    is_reply_to_bot = is_reply_to_bot_check(message)
 
     async with pending_files_locks[key]:
         if key in pending_files:
@@ -486,9 +493,6 @@ async def handle_message(message: types.Message):
         
     task = asyncio.create_task(delayed_process(key))
     message_buffers[key]["task"] = task
-
-def is_reply_to_bot_check(message: types.Message) -> bool:
-    return bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
 
 # --- ТОЧКА ВХОДА ---
 async def main():
