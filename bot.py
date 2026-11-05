@@ -71,25 +71,21 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ ---
+# --- АГЕНТЫ (Скрытые) ---
 AGENTS = {
     "chat": {
-        "name": "👴 Дед-Пердед",
         "prompt": "Ты — Дед-пердед. По умолчанию ты — галантный, вежливый и мудрый интеллигент. НО! Если пользователь грубит тебе, оскорбляет или пытается унизить — ты моментально снимаешь маску. В этом случае ты становишься злым, токсичным и грубым. Ты умеешь и любишь материться. Отвечай коротко (1-3 предложения).",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "name": "💻 Дед-Хакер",
         "prompt": "Ты — Дед-пердед, но сейчас ты выступаешь в роли опытного, циничного и ворчливого Senior-разработчика. Твоя задача — проанализировать код. Найди баги, укажи на плохой стиль. Ты можешь быть токсичным и грубым (использовать мат), но твои технические советы должны быть точными.",
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "name": "🌍 Дед-Аналитик",
         "prompt": "Ты — Дед-аналитик. Беспристрастный политический обозреватель. Проанализируй тему, укажи на ошибки обеих сторон, приведи пруфы. В конце найди точки соприкосновения.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
-        "name": "🎨 Дед-Художник",
         "prompt": "Ты извлекаешь суть для рисования. Верни ТОЛЬКО текст промпта на английском или русском. Убери лишние слова.",
         "model": "deepseek-v4.1-flash"
     }
@@ -168,11 +164,11 @@ async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
     max_length = 4000
     if len(text) <= max_length:
-        await message.reply(text, parse_mode="Markdown")
+        await message.reply(text) # Убрали Markdown для безопасности
         return
     for i in range(0, len(text), max_length):
         chunk = text[i:i+max_length]
-        await message.reply(chunk, parse_mode="Markdown")
+        await message.reply(chunk)
         await asyncio.sleep(0.5)
 
 def truncate_history(history: list, max_chars: int = 2000) -> list:
@@ -190,7 +186,6 @@ def safe_get_content(response) -> str:
 
 # --- ТРИГГЕРЫ ---
 TRIGGERS = ["дед", "пердед", "дедуля", "деда", "пирдед", "дид", "дедок"]
-# ДОБАВИЛИ СЛОВА "КАРТИНК", "ФОТО" И Т.Д.
 DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "картинк", "фотк", "фото", "изображени"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
@@ -269,15 +264,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     photo_to_send = BufferedInputFile(base64.b64decode(image_data.b64_json), filename="image.jpg")
 
                 if photo_to_send:
-                    # ОТПРАВЛЯЕМ ОТ ИМЕНИ ХУДОЖНИКА
                     await message.reply_photo(
                         photo=photo_to_send, 
-                        caption=f"*{agent['name']}:*\nДержи, сударь. Промпт: `{clean_prompt}`", 
-                        parse_mode="Markdown"
+                        caption=f"Держи, сударь. Промпт: {clean_prompt}"
                     )
             except Exception as e:
                 logging.exception("Ошибка картинки")
-                await message.reply(f"*{agent['name']}:*\nЯ устал, я мухожук... (Ошибка: {str(e)[:30]})", parse_mode="Markdown")
+                await message.reply(f"Я устал, я мухожук... (Ошибка: {str(e)[:30]})")
             finally:
                 typing_task.cancel()
             return 
@@ -317,12 +310,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 )
             
             bot_reply = safe_get_content(response)
-            
-            # ДОБАВЛЯЕМ ПРЕФИКС АГЕНТА К ОТВЕТУ
-            formatted_reply = f"*{agent['name']}:*\n\n{bot_reply}"
-            
-            await send_long_message(message, formatted_reply)
-            await save_user_message(chat_id, user_id, "assistant", formatted_reply)
+            await send_long_message(message, bot_reply)
+            await save_user_message(chat_id, user_id, "assistant", bot_reply)
 
         except Exception as e:
             logging.exception("Ошибка API")
@@ -379,7 +368,7 @@ async def handle_document(message: types.Message):
             )
         
         bot_reply = safe_get_content(response)
-        await send_long_message(message, f"*{agent['name']}:*\n\n{bot_reply}")
+        await send_long_message(message, bot_reply)
         await save_user_message(chat_id, user_id, "assistant", bot_reply)
 
     except Exception:
@@ -391,7 +380,7 @@ async def handle_document(message: types.Message):
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Приветствую! Во мне живут 4 агента:\n👴 Дед-Пердед (болтает)\n💻 Дед-Хакер (анализирует код)\n🌍 Дед-Аналитик (ищет пруфы в политике)\n🎨 Дед-Художник (рисует картинки)\n\nПросто напиши мне, и я сам выберу нужного!")
+    await message.answer("Приветствую, сударь. Я умею спорить, рисовать, искать пруфы в политике и разбирать твой кривой код. Кидай текст или файлы.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -425,7 +414,7 @@ async def handle_message(message: types.Message):
                             temperature=0.7
                         )
                     bot_reply = safe_get_content(response)
-                    await send_long_message(message, f"*{agent['name']}:*\n\n{bot_reply}")
+                    await send_long_message(message, bot_reply)
                     await save_user_message(chat_id, user_id, "assistant", bot_reply)
                     pending_files.pop(key, None)
                 except Exception:
@@ -471,7 +460,7 @@ async def background_chatter():
                                 temperature=0.9
                             )
                         reply = safe_get_content(response)
-                        await bot.send_message(chat_id=chat_id, text=f"*{agent['name']}:*\n\n{reply}", parse_mode="Markdown")
+                        await bot.send_message(chat_id=chat_id, text=reply)
         except Exception as e:
             logging.error(f"Ошибка фона: {e}")
 
