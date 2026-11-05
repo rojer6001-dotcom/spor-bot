@@ -9,6 +9,7 @@ import time
 import io
 import httpx
 from datetime import datetime
+from zoneinfo import ZoneInfo  # <-- ДОБАВЛЕНО ДЛЯ МОСКОВСКОГО ВРЕМЕНИ
 from collections import defaultdict
 from difflib import get_close_matches
 from aiogram import Bot, Dispatcher, types, F
@@ -76,6 +77,11 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 
 message_buffers = {} 
 pending_files = {} 
+
+# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВРЕМЕНИ ---
+def get_moscow_time():
+    """Возвращает текущее время по Москве в формате ДД.ММ.ГГГГ ЧЧ:ММ"""
+    return datetime.now(ZoneInfo("Europe/Moscow")).strftime("%d.%m.%Y %H:%M")
 
 # --- АГЕНТЫ ---
 AGENTS = {
@@ -261,8 +267,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             chat_join_cooldowns[chat_id] = now
             agent = AGENTS["chat"]
             
-            # Добавляем текущую дату в контекст при вклинивании
-            current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+            # ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
+            current_time = get_moscow_time()
             prompt = f"Текущее время: {current_time}.\nТы видишь переписку в чате:\n" + "\n".join(context_msgs) + "\n\nВклинись в этот разговор. Прокомментируй тему, дай совет или выскажи мнение. Отвечай коротко (1-2 предложения)."
             
             typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -331,9 +337,9 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         typing_task = asyncio.create_task(keep_typing(chat_id))
         
         try:
-            # Получаем текущую дату и время
-            current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
-            time_context = f"\n\nВажная информация: Текущая дата и время — {current_time}."
+            # ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
+            current_time = get_moscow_time()
+            time_context = f"\n\nВажная информация: Текущая дата и время (по Москве) — {current_time}."
 
             if is_code_request:
                 agent = AGENTS["code"]
@@ -510,14 +516,14 @@ async def handle_document(message: types.Message):
             return
         
         agent = AGENTS["code"]
-        current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+        current_time = get_moscow_time() # <-- ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
         prompt_text = f"Файл '{filename}'. Задача: '{message.caption}'.\n\nКод:\n\n{code_text}"
         await save_user_message(chat_id, user_id, "user", f"[Файл: {filename}] Задача: {message.caption}")
         
         async with api_semaphore:
             response = await client.chat.completions.create(
                 model=agent["model"],
-                messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время: {current_time}"}, {"role": "user", "content": prompt_text}],
+                messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время (МСК): {current_time}"}, {"role": "user", "content": prompt_text}],
                 temperature=0.7
             )
         
@@ -559,14 +565,14 @@ async def handle_message(message: types.Message):
                 typing_task = asyncio.create_task(keep_typing(chat_id))
                 try:
                     agent = AGENTS["code"]
-                    current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+                    current_time = get_moscow_time() # <-- ИСПОЛЬЗУЕМ МОСКОВСКОЕ ВРЕМЯ
                     prompt_text = f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"
                     await save_user_message(chat_id, user_id, "user", f"[Файл] {message.text}")
                     
                     async with api_semaphore:
                         response = await client.chat.completions.create(
                             model=agent["model"],
-                            messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время: {current_time}"}, {"role": "user", "content": prompt_text}],
+                            messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время (МСК): {current_time}"}, {"role": "user", "content": prompt_text}],
                             temperature=0.7
                         )
                     bot_reply = safe_get_content(response)
