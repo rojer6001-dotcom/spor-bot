@@ -86,14 +86,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ДЛЯ ВРЕМЕНИ ---
+# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 def get_moscow_time():
-    """Возвращает текущее время по Москве (UTC+3)"""
     return (datetime.utcnow() + timedelta(hours=3)).strftime("%d.%m.%Y %H:%M")
 
 def get_moscow_datetime_obj():
-    """Возвращает текущее время по Москве как объект datetime"""
     return datetime.utcnow() + timedelta(hours=3)
+
+def format_text(text: str) -> str:
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
+    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
+    return text
 
 # --- АГЕНТЫ ---
 AGENTS = {
@@ -144,6 +148,29 @@ async def save_chat_message(chat_id: int, message_text: str):
         session.add(ChatContext(chat_id=chat_id, message_text=message_text))
         await session.commit()
 
+async def get_active_reminders(chat_id: int, user_id: int) -> list:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Reminder).where(Reminder.chat_id == chat_id, Reminder.user_id == user_id).order_by(Reminder.remind_time)
+        )
+        return result.scalars().all()
+
+async def delete_reminders_by_query(chat_id: int, user_id: int, text_query: str = None):
+    async with async_session() as session:
+        if text_query:
+            # Удаляем по частичному совпадению текста
+            await session.execute(
+                text("DELETE FROM reminders WHERE chat_id = :chat_id AND user_id = :user_id AND text LIKE :text_query"),
+                {"chat_id": chat_id, "user_id": user_id, "text_query": f"%{text_query}%"}
+            )
+        else:
+            # Удаляем все
+            await session.execute(
+                text("DELETE FROM reminders WHERE chat_id = :chat_id AND user_id = :user_id"),
+                {"chat_id": chat_id, "user_id": user_id}
+            )
+        await session.commit()
+
 async def cleanup_db():
     while True:
         await asyncio.sleep(3600 * 24) 
@@ -157,7 +184,6 @@ async def cleanup_db():
                         ) WHERE rn <= 50
                     )
                 """))
-                # Очистка старых напоминаний
                 await session.execute(
                     text("DELETE FROM reminders WHERE remind_time < :now"), 
                     {"now": get_moscow_datetime_obj()}
@@ -192,11 +218,10 @@ async def keep_typing(chat_id: int):
 async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
     
-    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
+    formatted_text = format_text(text)
     
     max_length = 4000
-    chunks = [text[i:i+max_length] for i in range(0, len(text), max_length)]
+    chunks = [formatted_text[i:i+max_length] for i in range(0, len(formatted_text), max_length)]
     
     for chunk in chunks:
         try:
@@ -229,17 +254,19 @@ DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
 DETAIL_TRIGGERS = ["подробнее", "разверни", "расскажи больше", "приведи пруфы", "обоснуй", "детали"]
-REMINDER_TRIGGERS = ["напомни", "таймер", "напоминание"]
+
+REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "создай напоминание", "напоминание на"]
+REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
+REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоминание", "отмени напоминание", "убери таймер", "удали все напоминания", "отмени все таймеры"]
 
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
 async def reminder_worker():
     logging.info("Таймер напоминаний запущен.")
     while True:
-        await asyncio.sleep(30) # Проверяем каждые 30 секунд
+        await asyncio.sleep(30) 
         try:
             now = get_moscow_datetime_obj()
             async with async_session() as session:
-                # Ищем напоминания, время которых уже наступило
                 result = await session.execute(
                     select(Reminder).where(Reminder.remind_time <= now)
                 )
@@ -247,14 +274,16 @@ async def reminder_worker():
                 
                 for rem in reminders:
                     try:
+                        formatted_rem = format_text(f"🔔 **Напоминаю:**\n{rem.text}")
                         await bot.send_message(
                             chat_id=rem.chat_id,
-                            text=f"🔔 **Напоминаю:**\n{rem.text}"
+                            text=formatted_rem,
+                            parse_mode="HTML"
                         )
                     except Exception as e:
                         logging.error(f"Не удалось отправить напоминание в {rem.chat_id}: {e}")
+                        await bot.send_message(chat_id=rem.chat_id, text=f"🔔 Напоминаю:\n{rem.text}")
                     
-                    # Удаляем выполненное напоминание
                     await session.delete(rem)
                 await session.commit()
         except Exception as e:
@@ -293,14 +322,21 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
-    is_reminder_request = any(trigger in text_lower for trigger in REMINDER_TRIGGERS)
+    
+    is_reminder_create = any(trigger in text_lower for trigger in REMINDER_CREATE_TRIGGERS)
+    is_reminder_list = any(trigger in text_lower for trigger in REMINDER_LIST_TRIGGERS)
+    is_reminder_delete = any(trigger in text_lower for trigger in REMINDER_DELETE_TRIGGERS)
+
+    # Приоритет: Удаление > Список > Создание
+    if is_reminder_delete or is_reminder_list:
+        is_reminder_create = False
     
     if is_code_request: is_draw_request = False
     if is_political_request: is_draw_request = False
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_request):
+    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
             return
@@ -338,12 +374,79 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     async with user_locks[key]:
         
-        # --- ЛОГИКА НАПОМИНАНИЯ ---
-        if is_reminder_request:
+        # --- ЛОГИКА СПИСКА НАПОМИНАНИЙ ---
+        if is_reminder_list:
+            typing_task = asyncio.create_task(keep_typing(chat_id))
+            try:
+                reminders = await get_active_reminders(chat_id, user_id)
+                if not reminders:
+                    await message.reply("У тебя нет активных напоминаний.")
+                else:
+                    reply_text = "**Твои активные напоминания:**\n\n"
+                    for i, rem in enumerate(reminders, 1):
+                        t_str = rem.remind_time.strftime("%d.%m.%Y в %H:%M")
+                        reply_text += f"{i}. **{t_str}** — {rem.text}\n"
+                    
+                    formatted_text = format_text(reply_text)
+                    await message.reply(formatted_text, parse_mode="HTML")
+            except Exception as e:
+                logging.error(f"Ошибка получения списка напоминаний: {e}")
+                await message.reply("Не удалось получить список напоминаний.")
+            finally:
+                typing_task.cancel()
+            return
+
+        # --- ЛОГИКА УДАЛЕНИЯ НАПОМИНАНИЙ ---
+        if is_reminder_delete:
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 current_time = get_moscow_time()
-                # Просим нейросеть распарсить запрос в JSON
+                parse_prompt = (
+                    f"Текущее время: {current_time}.\n"
+                    f"Пользователь пишет: '{text}'.\n"
+                    f"Он хочет удалить напоминание(я).\n"
+                    f"Твоя задача — понять, что именно он хочет удалить.\n"
+                    f"Если он хочет удалить ВСЕ напоминания (например: 'удали все'), верни JSON: {{\"delete_all\": true}}.\n"
+                    f"Если он хочет удалить конкретное напоминание, извлеки ключевое слово из его текста и верни JSON: {{\"query\": \"ключевое слово\"}}.\n"
+                    f"Ответь СТРОГО в формате JSON без разметки."
+                )
+                
+                async with api_semaphore:
+                    parse_response = await client.chat.completions.create(
+                        model="gpt-6.1-sol",
+                        messages=[{"role": "user", "content": parse_prompt}],
+                        temperature=0.1
+                    )
+                
+                raw_json = safe_get_content(parse_response).strip()
+                raw_json = re.sub(r'```json|```', '', raw_json).strip()
+                
+                data = json.loads(raw_json)
+                
+                if data.get("delete_all"):
+                    await delete_reminders_by_query(chat_id, user_id, text_query=None)
+                    await message.reply("Хорошо, я удалил **все** твои напоминания.")
+                elif data.get("query"):
+                    query = data["query"]
+                    await delete_reminders_by_query(chat_id, user_id, text_query=query)
+                    await message.reply(f"Понял. Если было напоминание со словом **«{query}»**, я его удалил.")
+                else:
+                    await message.reply("Я не понял, какое именно напоминание нужно удалить. Уточни.")
+                    
+            except json.JSONDecodeError:
+                await message.reply("Произошла ошибка при разборе запроса на удаление.")
+            except Exception as e:
+                logging.error(f"Ошибка удаления напоминания: {e}")
+                await message.reply("Не удалось удалить напоминание.")
+            finally:
+                typing_task.cancel()
+            return
+
+        # --- ЛОГИКА СОЗДАНИЯ НАПОМИНАНИЯ ---
+        if is_reminder_create:
+            typing_task = asyncio.create_task(keep_typing(chat_id))
+            try:
+                current_time = get_moscow_time()
                 parse_prompt = (
                     f"Текущее время: {current_time} (Москва).\n"
                     f"Пользователь просит: '{text}'.\n"
@@ -361,7 +464,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     )
                 
                 raw_json = safe_get_content(parse_response).strip()
-                # Очищаем от возможных маркеров markdown
                 raw_json = re.sub(r'```json|```', '', raw_json).strip()
                 
                 data = json.loads(raw_json)
@@ -383,9 +485,9 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     session.add(Reminder(chat_id=chat_id, user_id=user_id, text=rem_text, remind_time=rem_datetime))
                     await session.commit()
                 
-                # Красиво форматируем дату для ответа
                 formatted_time = rem_datetime.strftime("%d.%m.%Y в %H:%M")
-                await message.reply(f"Хорошо, напомню **{formatted_time}**:\n_{rem_text}_")
+                reply_text = format_text(f"Хорошо, напомню **{formatted_time}**:\n_{rem_text}_")
+                await message.reply(reply_text, parse_mode="HTML")
                 
             except json.JSONDecodeError:
                 await message.reply("Произошла ошибка при разборе времени. Попробуй переформулировать.")
@@ -398,6 +500,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
         # --- ЛОГИКА РИСОВАНИЯ ---
         if is_draw_request:
+            # ... (без изменений) ...
             agent = AGENTS["draw"]
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
@@ -508,6 +611,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 # --- ОБРАБОТЧИК ГОЛОСОВЫХ ---
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
+    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕНО ГОЛОСОВОЕ ОТ {message.from_user.id} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
@@ -553,6 +657,7 @@ async def handle_voice(message: types.Message):
 # --- ОБРАБОТЧИК ФОТО ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
+    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕНО ФОТО ОТ {message.from_user.id} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
@@ -579,6 +684,7 @@ async def handle_photo(message: types.Message):
 # --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
+    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕН ДОКУМЕНТ: {message.document.file_name} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
@@ -643,10 +749,11 @@ async def handle_document(message: types.Message):
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Меня зовут Нафаня. Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, понять твои голосовые или фото, а также установить напоминание. Спрашивай.")
+    await message.answer("Привет! Меня зовут Нафаня. Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, понять твои голосовые или фото, а также поставить, показать или удалить напоминание. Спрашивай.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
+    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕН ТЕКСТ ОТ {message.from_user.id}: {message.text[:50]} !!!")
     if not message.text or not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
@@ -709,7 +816,7 @@ async def main():
         logging.info("База данных готова.")
 
     asyncio.create_task(cleanup_db())
-    asyncio.create_task(reminder_worker()) # <-- Запуск таймера напоминаний
+    asyncio.create_task(reminder_worker())
     
     try:
         await dp.start_polling(bot)
