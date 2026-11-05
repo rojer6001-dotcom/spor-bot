@@ -5,6 +5,7 @@ import asyncio
 import base64
 import codecs
 import time
+import io
 import httpx
 from collections import defaultdict
 from difflib import get_close_matches
@@ -74,18 +75,18 @@ async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit
 message_buffers = {} 
 pending_files = {} 
 
-# --- АГЕНТЫ НАФАНИ (ОБНОВЛЕННЫЕ) ---
+# --- АГЕНТЫ (Обычный разговорный стиль) ---
 AGENTS = {
     "chat": {
-        "prompt": "Ты — полезный и дружелюбный ИИ-помощник. Общайся обычным, живым языком, без лишних сюсюканий и сказочных оборотов. Отвечай на вопросы кратко и по существу. Если пользователь просто болтает, поддержи беседу. Если тебе переслали новость, выскажи свое мнение коротко (1-2 предложения), без длинных отчетов.",
+        "prompt": "Ты — полезный и дружелюбный ИИ-помощник. Общайся обычным, живым языком, без лишних сюсюканий. Отвечай на вопросы кратко и по существу. Если пользователь просто болтает, поддержи беседу. Если тебе переслали новость или фото, выскажи свое мнение коротко (1-2 предложения).",
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Если код плохой, можешь указать на это, но без оскорблений. Пиши только то, что поможет решить проблему.",
+        "prompt": "Ты — опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Пиши только то, что поможет решить проблему.",
         "model": "gpt-6.1-sol"
     },
     "political": {
-        "prompt": "Ты — аналитик. Твоя задача — дать краткую и объективную оценку политической новости или ситуации. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи и таблицы, если пользователь прямо не попросил 'разверни', 'приведи пруфы' или 'расскажи подробнее'.",
+        "prompt": "Ты — аналитик. Дай краткую и объективную оценку политической новости. Сформулируй главную суть в 2-3 предложениях. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать длинные аналитические статьи, если пользователь прямо не попросил 'разверни' или 'приведи пруфы'.",
         "model": "gpt-6.1-sol"
     },
     "draw": {
@@ -208,7 +209,7 @@ async def delayed_process(key: tuple):
         logging.exception("Ошибка буфера")
         await data["message"].reply("Что-то пошло не так. Попробуй еще раз.")
 
-async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool):
+async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool, image_b64: str = None):
     if not message.from_user: return 
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -221,7 +222,10 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     text_lower = text.lower()
     words = text_lower.split()
     sender_name = message.from_user.first_name or "Кто-то"
-    await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
+    
+    # Не сохраняем в общий контекст, если это картинка (чтобы не спамить)
+    if not image_b64:
+        await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
@@ -235,8 +239,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    # Логика вклинивания в чужой диалог
-    if is_group and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request):
+    # Логика вклинивания в чужой диалог (только для текста)
+    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
             return
@@ -333,16 +337,33 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             else:
                 agent = AGENTS["chat"]
                 final_text = text
-                temp = 0.85
+                temp = 0.7 if image_b64 else 0.85
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
-            safe_history.append({"role": "user", "content": final_text})
+            
+            # Формируем запрос (с картинкой или без)
+            if image_b64:
+                messages = [{"role": "system", "content": agent["prompt"]}]
+                for h in safe_history:
+                    messages.append(h)
+                
+                user_content = [{"type": "text", "text": final_text}]
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
+                })
+                messages.append({"role": "user", "content": user_content})
+                model_to_use = "gpt-6.1-sol" # Мультимодальная модель
+            else:
+                messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
+                messages.append({"role": "user", "content": final_text})
+                model_to_use = agent["model"]
 
             async with api_semaphore:
                 response = await client.chat.completions.create(
-                    model=agent["model"],
-                    messages=[{"role": "system", "content": agent["prompt"]}] + safe_history,
+                    model=model_to_use,
+                    messages=messages,
                     temperature=temp
                 )
             
@@ -355,6 +376,80 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             await message.reply("Ошибка при обращении к нейросети. Попробуйте позже.")
         finally:
             typing_task.cancel()
+
+# --- ОБРАБОТЧИК ГОЛОСОВЫХ ---
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    if not message.from_user: return
+    user_id, chat_id = message.from_user.id, message.chat.id
+    key = (chat_id, user_id)
+    
+    typing_task = asyncio.create_task(keep_typing(chat_id))
+    try:
+        file = await bot.get_file(message.voice.file_id)
+        buffer = io.BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        buffer.name = "voice.ogg"
+        buffer.seek(0)
+        
+        async with api_semaphore:
+            transcript = await client.audio.transcriptions.create(
+                model="whisper-1",
+                file=buffer
+            )
+        
+        text = transcript.text
+        typing_task.cancel()
+        await message.reply(f"🎤 Распознано: {text}")
+        
+        # Передаем текст в общую обработку
+        is_reply_to_bot = is_reply_to_bot_check(message)
+        is_forwarded = message.forward_origin is not None
+        
+        if key in message_buffers:
+            message_buffers[key]["text"] += "\n" + text
+            if message_buffers[key]["task"]: message_buffers[key]["task"].cancel()
+        else:
+            message_buffers[key] = {"text": text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
+            
+        task = asyncio.create_task(delayed_process(key))
+        message_buffers[key]["task"] = task
+        
+    except Exception as e:
+        logging.error(f"Voice error: {e}")
+        await message.reply("Не удалось распознать голосовое сообщение.")
+    finally:
+        if not typing_task.cancelled():
+            typing_task.cancel()
+
+# --- ОБРАБОТЧИК ФОТО ---
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    if not message.from_user: return
+    user_id, chat_id = message.from_user.id, message.chat.id
+    key = (chat_id, user_id)
+    
+    now = time.time()
+    if user_id in user_cooldowns and now - user_cooldowns[user_id] < COOLDOWN_SECONDS:
+        return
+    user_cooldowns[user_id] = now
+
+    # Берем картинку в максимальном качестве
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    buffer = io.BytesIO()
+    await bot.download_file(file.file_path, destination=buffer)
+    
+    img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
+    caption = message.caption or "Что на этой картинке? Опиши."
+    is_forwarded = message.forward_origin is not None
+    
+    async with user_locks[key]:
+        try:
+            await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
+        except Exception as e:
+            logging.error(f"Photo error: {e}")
+            await message.reply("Не удалось обработать фото.")
 
 # --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
@@ -371,7 +466,7 @@ async def handle_document(message: types.Message):
 
     allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md']
     if os.path.splitext(filename)[1].lower() not in allowed_extensions:
-        await message.reply("Я понимаю только код и текст. Поддерживаемые форматы: py, txt, js, ts, html, css, json, md.")
+        await message.reply("Я понимаю только код и текст.")
         return
 
     typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -417,36 +512,17 @@ async def handle_document(message: types.Message):
 # --- ОБРАБОТЧИКИ ТЕКСТА ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию в интернете или сгенерировать картинку. Спрашивай.")
+    await message.answer("Привет! Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, а также понять твои голосовые или фото. Спрашивай.")
 
-@dp.message(F.text | F.caption)
+@dp.message(F.text)
 async def handle_message(message: types.Message):
-    if not message.from_user: return
-    
-    current_text = message.text or message.caption or ""
-    reply_context = ""
-    
-    if message.reply_to_message:
-        replied = message.reply_to_message
-        reply_context = replied.text or replied.caption or ""
-        
-    is_forwarded = message.forward_origin is not None
-    if is_forwarded:
-        current_text = f"[Пересланное сообщение]: {current_text}"
-        
-    full_text = current_text
-    if reply_context and not is_reply_to_bot_check(message):
-        full_text = f"[В ответ на сообщение]: {reply_context}\n\n[Вопрос/комментарий]: {current_text}"
-
-    if not full_text.strip():
-        return
-
+    if not message.text or not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
-    
-    if full_text.startswith('/'): return
+    if message.text.startswith('/'): return
     
     is_reply_to_bot = is_reply_to_bot_check(message)
+    is_forwarded = message.forward_origin is not None
 
     async with pending_files_locks[key]:
         if key in pending_files:
@@ -460,8 +536,8 @@ async def handle_message(message: types.Message):
                 typing_task = asyncio.create_task(keep_typing(chat_id))
                 try:
                     agent = AGENTS["code"]
-                    prompt_text = f"Файл '{file_data['filename']}'. Задача: '{full_text}'.\n\nКод:\n\n{file_data['text']}"
-                    await save_user_message(chat_id, user_id, "user", f"[Файл] {full_text}")
+                    prompt_text = f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"
+                    await save_user_message(chat_id, user_id, "user", f"[Файл] {message.text}")
                     
                     async with api_semaphore:
                         response = await client.chat.completions.create(
@@ -482,12 +558,12 @@ async def handle_message(message: types.Message):
                 return
 
     if key in message_buffers:
-        message_buffers[key]["text"] += "\n" + full_text
+        message_buffers[key]["text"] += "\n" + message.text
         message_buffers[key]["is_reply"] = message_buffers[key]["is_reply"] or is_reply_to_bot
         message_buffers[key]["is_forwarded"] = message_buffers[key]["is_forwarded"] or is_forwarded
         if message_buffers[key]["task"]: message_buffers[key]["task"].cancel()
     else:
-        message_buffers[key] = {"text": full_text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
+        message_buffers[key] = {"text": message.text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
         
     task = asyncio.create_task(delayed_process(key))
     message_buffers[key]["task"] = task
