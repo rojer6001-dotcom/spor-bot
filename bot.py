@@ -319,7 +319,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
-    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not image_b64
+    
+    # ЖЕСТКОЕ ПРАВИЛО: если есть картинка (image_b64), НИКАКОГО рисования новой
+    if image_b64:
+        is_draw_request = False
+    else:
+        is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
+
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
@@ -336,7 +342,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    # Логика вклинивания в чужой диалог
     if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
@@ -376,7 +381,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     async with user_locks[key]:
         
         if is_reminder_list:
-            # ... (без изменений)
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 reminders = await get_active_reminders(chat_id, user_id)
@@ -398,7 +402,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             return
 
         if is_reminder_delete:
-            # ... (без изменений)
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 current_time = get_moscow_time()
@@ -444,7 +447,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             return
 
         if is_reminder_create:
-            # ... (без изменений)
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 current_time = get_moscow_time()
@@ -539,7 +541,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return 
 
-        # --- ТЕКСТОВАЯ ЛОГИКА ---
+        # --- ТЕКСТОВАЯ ЛОГИКА (VISION) ---
         history = await get_user_history(chat_id, user_id)
         typing_task = asyncio.create_task(keep_typing(chat_id))
         
@@ -662,23 +664,25 @@ async def handle_photo(message: types.Message):
     key = (chat_id, user_id)
 
     try:
-        # Скачиваем фото
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
         buffer = io.BytesIO()
         await bot.download_file(file.file_path, destination=buffer)
-        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         
+        if buffer.getbuffer().nbytes == 0:
+            await message.reply("Не удалось скачать фото (файл пустой).")
+            return
+            
+        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
         caption = message.caption
         
         if caption:
-            # Если есть подпись, обрабатываем как обычный запрос с картинкой
+            # Если есть подпись, передаем картинку и текст в общую логику
             await process_aggregated_text(message, caption, is_reply_to_bot_check(message), message.forward_origin is not None, image_b64=img_b64)
         else:
             # Если подписи нет, бот "молча" смотрит на фото, запоминает его и ставит реакцию
             logging.info("ФОТО БЕЗ ПОДПИСИ. Анализирую молча...")
             
-            # Отправляем в Vision, чтобы получить описание
             async with api_semaphore:
                 desc_prompt = "Опиши это изображение кратко (1-2 предложения), чтобы я мог запомнить контекст."
                 messages = [
@@ -695,15 +699,12 @@ async def handle_photo(message: types.Message):
                 )
             
             description = safe_get_content(response)
-            
-            # Сохраняем это описание в историю диалога, чтобы бот мог ответить на следующий вопрос
             await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем изображено: {description}]")
             
-            # Ставим реакцию "Глаза" на сообщение пользователя, чтобы он понял, что бот его увидел
             try:
                 await message.react([types.ReactionTypeEmoji(emoji="👀")])
             except Exception:
-                pass # Если не получилось поставить реакцию, просто игнорируем
+                pass
             
     except Exception as e:
         logging.exception("Photo download/vision error")
@@ -712,7 +713,6 @@ async def handle_photo(message: types.Message):
 # --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
-    # ... (без изменений) ...
     logging.info(f"!!! ПОЛУЧЕН ДОКУМЕНТ: {message.document.file_name} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
