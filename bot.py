@@ -26,6 +26,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 BOT_TOKEN = os.getenv("BOT_TOKEN") or os.getenv("API_TOKEN")
 PLUSVIBE_API_KEY = os.getenv("PLUSVIBE_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+JAMENDO_CLIENT_ID = os.getenv("JAMENDO_CLIENT_ID") # <-- Ключ Jamendo
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
 if not BOT_TOKEN or not PLUSVIBE_API_KEY:
@@ -98,6 +99,35 @@ def format_text(text: str) -> str:
     text = re.sub(r'_(.*?)_', r'<i>\1</i>', text)
     text = re.sub(r'`(.*?)`', r'<code>\1</code>', text)
     return text
+
+async def search_jamendo(query: str) -> dict | None:
+    if not JAMENDO_CLIENT_ID:
+        return None
+    url = "https://api.jamendo.com/v3.0/tracks/"
+    params = {
+        "client_id": JAMENDO_CLIENT_ID,
+        "format": "json",
+        "limit": 1,
+        "search": query,
+        "audioformat": "mp32"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as http_client:
+            response = await http_client.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [])
+            if not results:
+                return None
+            track = results[0]
+            return {
+                "name": track.get("name", "Неизвестный трек"),
+                "artist": track.get("artist_name", "Неизвестный исполнитель"),
+                "audio_url": track.get("audio", ""),
+            }
+    except Exception as e:
+        logging.error(f"Ошибка поиска в Jamendo: {e}")
+        return None
 
 # --- АГЕНТЫ ---
 AGENTS = {
@@ -255,6 +285,7 @@ DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
 DETAIL_TRIGGERS = ["подробнее", "разверни", "расскажи больше", "приведи пруфы", "обоснуй", "детали"]
+MUSIC_TRIGGERS = ["найди песню", "включи музыку", "поиск музыки", "найди трек", "поставь песню"]
 
 REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "создай напоминание", "напоминание на"]
 REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
@@ -320,7 +351,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     
-    # ЖЕСТКОЕ ПРАВИЛО: если есть картинка, никакого рисования новой
     if image_b64:
         is_draw_request = False
     else:
@@ -329,6 +359,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
+    is_music_request = any(trigger in text_lower for trigger in MUSIC_TRIGGERS)
     
     is_reminder_create = any(trigger in text_lower for trigger in REMINDER_CREATE_TRIGGERS)
     is_reminder_list = any(trigger in text_lower for trigger in REMINDER_LIST_TRIGGERS)
@@ -339,10 +370,14 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     
     if is_code_request: is_draw_request = False
     if is_political_request: is_draw_request = False
+    if is_music_request: 
+        is_draw_request = False
+        is_code_request = False
+        is_political_request = False
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete):
+    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete or is_music_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
             return
@@ -380,6 +415,38 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     async with user_locks[key]:
         
+        # --- ЛОГИКА ПОИСКА МУЗЫКИ ---
+        if is_music_request:
+            typing_task = asyncio.create_task(keep_typing(chat_id))
+            try:
+                extract_prompt = f"Из запроса пользователя вычлени только исполнителя и название песни для поиска. Верни ТОЛЬКО поисковый запрос, без лишних слов. Запрос: '{text}'"
+                async with api_semaphore:
+                    extract_response = await client.chat.completions.create(
+                        model="deepseek-v4.1-flash",
+                        messages=[{"role": "user", "content": extract_prompt}],
+                        temperature=0.1
+                    )
+                search_query = safe_get_content(extract_response).strip()
+                
+                track = await search_jamendo(search_query)
+                
+                if track and track.get("audio_url"):
+                    await message.reply_audio(
+                        audio=track["audio_url"],
+                        title=track["name"],
+                        performer=track["artist"],
+                        caption=f"Нашел трек: **{track['name']}** — {track['artist']}"
+                    )
+                else:
+                    await message.reply(f"Не удалось найти трек по запросу «{search_query}». Попробуй переформулировать.")
+            except Exception as e:
+                logging.exception("Ошибка поиска музыки")
+                await message.reply("Не удалось найти музыку. Попробуй позже.")
+            finally:
+                typing_task.cancel()
+            return
+
+        # ... (Логика напоминаний и рисования без изменений) ...
         if is_reminder_list:
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
@@ -501,7 +568,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 typing_task.cancel()
             return
 
-        # --- ЛОГИКА РИСОВАНИЯ ---
         if is_draw_request:
             agent = AGENTS["draw"]
             typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -604,261 +670,16 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             await send_long_message(message, bot_reply)
             await save_user_message(chat_id, user_id, "assistant", bot_reply)
 
+        # ИСПРАВЛЕННЫЙ БЛОК EXCEPT
         except Exception as e:
+            error_str = str(e).lower()
             logging.exception("Ошибка API")
-            await message.reply(f"Ошибка API: {str(e)[:150]}")
+            if "connection" in error_str or "timeout" in error_str:
+                await message.reply("Ой, кажется, у меня пропала связь с сервером. Попробуй отправить сообщение еще раз через минуту.")
+            else:
+                await message.reply("Произошла ошибка при обработке запроса. Попробуй позже.")
         finally:
             typing_task.cancel()
 
-# --- ОБРАБОТЧИК ГОЛОСОВЫХ ---
-@dp.message(F.voice)
-async def handle_voice(message: types.Message):
-    logging.info(f"!!! ПОЛУЧЕНО ГОЛОСОВОЕ ОТ {message.from_user.id} !!!")
-    if not message.from_user: return
-    user_id, chat_id = message.from_user.id, message.chat.id
-    key = (chat_id, user_id)
-    
-    typing_task = asyncio.create_task(keep_typing(chat_id))
-    try:
-        file = await bot.get_file(message.voice.file_id)
-        buffer = io.BytesIO()
-        await bot.download_file(file.file_path, destination=buffer)
-        buffer.name = "voice.ogg"
-        buffer.seek(0)
-        
-        async with api_semaphore:
-            transcript = await client.audio.transcriptions.create(
-                model="whisper-large-v3-turbo",
-                file=buffer
-            )
-        
-        text = transcript.text
-        typing_task.cancel()
-        await message.reply(f"🎤 Распознано: {text}")
-        
-        is_reply_to_bot = is_reply_to_bot_check(message)
-        is_forwarded = message.forward_origin is not None
-        
-        if key in message_buffers:
-            message_buffers[key]["text"] += "\n" + text
-            if message_buffers[key]["task"]: message_buffers[key]["task"].cancel()
-        else:
-            message_buffers[key] = {"text": text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
-            
-        task = asyncio.create_task(delayed_process(key))
-        message_buffers[key]["task"] = task
-        
-    except Exception as e:
-        logging.error(f"Voice error: {e}")
-        await message.reply(f"Не удалось распознать голосовое. Ошибка: {str(e)[:50]}")
-    finally:
-        if not typing_task.cancelled():
-            typing_task.cancel()
-
-# --- ОБРАБОТЧИК ФОТО ---
-@dp.message(F.photo)
-async def handle_photo(message: types.Message):
-    logging.info(f"!!! ПОЛУЧЕНО ФОТО ОТ {message.from_user.id} !!!")
-    if not message.from_user: return
-    user_id, chat_id = message.from_user.id, message.chat.id
-    key = (chat_id, user_id)
-
-    try:
-        photo = message.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        buffer = io.BytesIO()
-        await bot.download_file(file.file_path, destination=buffer)
-        
-        if buffer.getbuffer().nbytes == 0:
-            await message.reply("Не удалось скачать фото (файл пустой).")
-            return
-            
-        img_b64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        caption = message.caption
-        
-        if caption:
-            # Если есть подпись, обрабатываем как запрос с картинкой
-            await process_aggregated_text(message, caption, is_reply_to_bot_check(message), message.forward_origin is not None, image_b64=img_b64)
-        else:
-            # Если подписи нет — бот "молча" смотрит на фото, запоминает его и ставит реакцию.
-            # В ЧАТ ОН НИЧЕГО НЕ ПИШЕТ.
-            logging.info("ФОТО БЕЗ ПОДПИСИ. Анализирую молча...")
-            
-            async with api_semaphore:
-                desc_prompt = "Опиши это изображение кратко (1-2 предложения), чтобы я мог запомнить контекст."
-                messages = [
-                    {"role": "system", "content": "Ты — ИИ-помощник."},
-                    {"role": "user", "content": [
-                        {"type": "text", "text": desc_prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}
-                    ]}
-                ]
-                response = await client.chat.completions.create(
-                    model="gpt-6.1-sol",
-                    messages=messages,
-                    temperature=0.5
-                )
-            
-            description = safe_get_content(response)
-            # Сохраняем в базу, чтобы бот знал контекст следующего вопроса
-            await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем изображено: {description}]")
-            
-            # Ставим реакцию, чтобы пользователь понял, что бот "увидел" фото
-            try:
-                await message.react([types.ReactionTypeEmoji(emoji="👀")])
-            except Exception:
-                pass
-            
-    except Exception as e:
-        logging.exception("Photo download/vision error")
-        await message.reply(f"Не удалось обработать фото. Ошибка: {str(e)[:50]}")
-
-# --- ОБРАБОТЧИК ФАЙЛОВ ---
-@dp.message(F.document)
-async def handle_document(message: types.Message):
-    logging.info(f"!!! ПОЛУЧЕН ДОКУМЕНТ: {message.document.file_name} !!!")
-    if not message.from_user: return
-    user_id, chat_id = message.from_user.id, message.chat.id
-    key = (chat_id, user_id)
-    document = message.document
-    filename = document.file_name or "file.txt"
-    
-    if document.file_size and document.file_size > 1024 * 1024:
-        await message.reply("Файл слишком большой (больше 1 МБ). Пришлите поменьше.")
-        return
-
-    allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.jpg', '.jpeg', '.png']
-    if os.path.splitext(filename)[1].lower() not in allowed_extensions:
-        await message.reply("Я понимаю только код, текст и картинки.")
-        return
-
-    if os.path.splitext(filename)[1].lower() in ['.jpg', '.jpeg', '.png']:
-        await message.reply("Ты прислал картинку как файл. Я пока умею читать только те, что отправлены как обычное фото.")
-        return
-
-    typing_task = asyncio.create_task(keep_typing(chat_id))
-    try:
-        file = await bot.get_file(document.file_id)
-        downloaded_file = await bot.download_file(file.file_path)
-        file_bytes = downloaded_file.read()
-        
-        if len(file_bytes) > 1024 * 1024: raise ValueError("Файл слишком большой")
-            
-        code_text = decode_text(file_bytes)
-        if len(code_text) > MAX_FILE_LENGTH:
-            await message.reply(f"В файле {len(code_text)} символов, а максимум — {MAX_FILE_LENGTH}.")
-            return
-        
-        if not message.caption:
-            async with pending_files_locks[key]:
-                pending_files[key] = {"text": code_text, "filename": filename, "timestamp": time.time(), "status": "pending"}
-            await message.reply("Файл получен. Что с ним сделать? Напиши задачу.")
-            return
-        
-        agent = AGENTS["code"]
-        current_time = get_moscow_time()
-        prompt_text = f"Файл '{filename}'. Задача: '{message.caption}'.\n\nКод:\n\n{code_text}"
-        await save_user_message(chat_id, user_id, "user", f"[Файл: {filename}] Задача: {message.caption}")
-        
-        async with api_semaphore:
-            response = await client.chat.completions.create(
-                model=agent["model"],
-                messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время (МСК): {current_time}"}, {"role": "user", "content": prompt_text}],
-                temperature=0.7
-            )
-        
-        bot_reply = safe_get_content(response)
-        await send_long_message(message, bot_reply)
-        await save_user_message(chat_id, user_id, "assistant", bot_reply)
-
-    except Exception:
-        logging.exception("Ошибка при анализе файла")
-        await message.reply("Не удалось прочитать файл. Возможно, он поврежден.")
-    finally:
-        typing_task.cancel()
-
-# --- ОБРАБОТЧИКИ ТЕКСТА ---
-@dp.message(Command("start"))
-async def cmd_start(message: types.Message):
-    await message.answer("Привет! Меня зовут Нафаня. Я — твой ИИ-помощник. Могу ответить на вопросы, проанализировать код, найти информацию, сгенерировать картинку, понять твои голосовые или фото, а также поставить, показать или удалить напоминание. Спрашивай.")
-
-@dp.message(F.text)
-async def handle_message(message: types.Message):
-    logging.info(f"!!! ПОЛУЧЕН ТЕКСТ ОТ {message.from_user.id}: {message.text[:50]} !!!")
-    if not message.text or not message.from_user: return
-    user_id, chat_id = message.from_user.id, message.chat.id
-    key = (chat_id, user_id)
-    if message.text.startswith('/'): return
-    
-    is_reply_to_bot = is_reply_to_bot_check(message)
-    is_forwarded = message.forward_origin is not None
-
-    async with pending_files_locks[key]:
-        if key in pending_files:
-            file_data = pending_files[key]
-            if time.time() - file_data["timestamp"] > FILE_TTL_SECONDS:
-                pending_files.pop(key, None)
-            elif file_data["status"] == "processing":
-                return 
-            else:
-                file_data["status"] = "processing"
-                typing_task = asyncio.create_task(keep_typing(chat_id))
-                try:
-                    agent = AGENTS["code"]
-                    current_time = get_moscow_time()
-                    prompt_text = f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"
-                    await save_user_message(chat_id, user_id, "user", f"[Файл] {message.text}")
-                    
-                    async with api_semaphore:
-                        response = await client.chat.completions.create(
-                            model=agent["model"],
-                            messages=[{"role": "system", "content": agent["prompt"] + f"\nТекущее время (МСК): {current_time}"}, {"role": "user", "content": prompt_text}],
-                            temperature=0.7
-                        )
-                    bot_reply = safe_get_content(response)
-                    await send_long_message(message, bot_reply)
-                    await save_user_message(chat_id, user_id, "assistant", bot_reply)
-                    pending_files.pop(key, None)
-                except Exception:
-                    logging.exception("Ошибка инструкции")
-                    await message.reply("Ошибка при обработке файла.")
-                    file_data["status"] = "pending"
-                finally:
-                    typing_task.cancel()
-                return
-
-    if key in message_buffers:
-        message_buffers[key]["text"] += "\n" + message.text
-        message_buffers[key]["is_reply"] = message_buffers[key]["is_reply"] or is_reply_to_bot
-        message_buffers[key]["is_forwarded"] = message_buffers[key]["is_forwarded"] or is_forwarded
-        if message_buffers[key]["task"]: message_buffers[key]["task"].cancel()
-    else:
-        message_buffers[key] = {"text": message.text, "message": message, "is_reply": is_reply_to_bot, "is_forwarded": is_forwarded}
-        
-    task = asyncio.create_task(delayed_process(key))
-    message_buffers[key]["task"] = task
-
-# --- ТОЧКА ВХОДА ---
-async def main():
-    await bot.delete_webhook(drop_pending_updates=False) 
-    
-    logging.info("Подключение к базе данных...")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    logging.info("База данных готова.")
-
-    asyncio.create_task(cleanup_db())
-    asyncio.create_task(reminder_worker())
-    
-    logging.info("Запуск бота (polling)...")
-    try:
-        await dp.start_polling(bot)
-    except Exception:
-        logging.exception("Критическая ошибка")
-    finally:
-        await client.close()
-        await engine.dispose()
-
-if __name__ == "__main__":
-    asyncio.run(main())
-    
+# ... (ОСТАЛЬНОЙ КОД: голосовые, фото, файлы, текст - БЕЗ ИЗМЕНЕНИЙ) ...
+# (Вставьте сюда обработчики голосовых, фото, файлов и handle_message из предыдущего полного кода)
