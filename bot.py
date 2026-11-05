@@ -227,7 +227,10 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
-    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS)
+    
+    # ВАЖНО: Если есть картинка (image_b64), мы НЕ запускаем генерацию новой картинки
+    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not image_b64
+    
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     
@@ -352,7 +355,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                 })
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-4o" 
+                model_to_use = "gpt-6.1-sol" # Используем умную модель для зрения
             else:
                 logging.info("ОТПРАВЛЯЮ ТЕКСТОВЫЙ ЗАПРОС...")
                 messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
@@ -441,7 +444,6 @@ async def handle_photo(message: types.Message):
         caption = message.caption or "Что на этой картинке? Опиши."
         is_forwarded = message.forward_origin is not None
         
-        # ВАЖНО: Убрали async with user_locks[key]: отсюда, так как она есть внутри process_aggregated_text
         await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
             
     except Exception as e:
