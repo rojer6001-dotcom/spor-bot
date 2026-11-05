@@ -223,7 +223,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     words = text_lower.split()
     sender_name = message.from_user.first_name or "Кто-то"
     
-    # Не сохраняем в общий контекст, если это картинка (чтобы не спамить)
     if not image_b64:
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
@@ -239,7 +238,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    # Логика вклинивания в чужой диалог (только для текста)
+    # Логика вклинивания в чужой диалог
     if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN:
@@ -342,7 +341,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
             
-            # Формируем запрос (с картинкой или без)
             if image_b64:
                 messages = [{"role": "system", "content": agent["prompt"]}]
                 for h in safe_history:
@@ -354,7 +352,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                 })
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-6.1-sol" # Мультимодальная модель
+                model_to_use = "gpt-6.1-sol"
             else:
                 messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
                 messages.append({"role": "user", "content": final_text})
@@ -394,7 +392,7 @@ async def handle_voice(message: types.Message):
         
         async with api_semaphore:
             transcript = await client.audio.transcriptions.create(
-                model="whisper-1",
+                model="whisper-large-v3-turbo",  # <-- ИСПРАВЛЕННАЯ МОДЕЛЬ
                 file=buffer
             )
         
@@ -402,7 +400,6 @@ async def handle_voice(message: types.Message):
         typing_task.cancel()
         await message.reply(f"🎤 Распознано: {text}")
         
-        # Передаем текст в общую обработку
         is_reply_to_bot = is_reply_to_bot_check(message)
         is_forwarded = message.forward_origin is not None
         
@@ -434,7 +431,6 @@ async def handle_photo(message: types.Message):
         return
     user_cooldowns[user_id] = now
 
-    # Берем картинку в максимальном качестве
     photo = message.photo[-1]
     file = await bot.get_file(photo.file_id)
     buffer = io.BytesIO()
