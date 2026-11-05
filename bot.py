@@ -164,15 +164,24 @@ async def keep_typing(chat_id: int):
     except asyncio.CancelledError:
         pass
 
+# ИСПРАВЛЕННАЯ ФУНКЦИЯ ОТПРАВКИ
 async def send_long_message(message: types.Message, text: str):
     if not text or not text.strip(): return
     max_length = 4000
-    if len(text) <= max_length:
-        await message.reply(text)
-        return
-    for i in range(0, len(text), max_length):
-        chunk = text[i:i+max_length]
-        await message.reply(chunk)
+    
+    # Разбиваем на куски, если текст слишком длинный
+    chunks = [text[i:i+max_length] for i in range(0, len(text), max_length)]
+    
+    for chunk in chunks:
+        try:
+            # Пытаемся отправить с Markdown (чтобы работали **жирный** и `код`)
+            await message.reply(chunk, parse_mode="Markdown")
+        except Exception as e:
+            # Если нейросеть ошиблась в разметке (например, забыла закрыть звездочку), 
+            # Telegram выдаст ошибку. В этом случае отправляем как обычный текст.
+            logging.warning(f"Ошибка парсинга Markdown: {e}. Отправляю как обычный текст.")
+            await message.reply(chunk)
+        
         await asyncio.sleep(0.5)
 
 def truncate_history(history: list, max_chars: int = 2000) -> list:
@@ -264,7 +273,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                         temperature=0.9
                     )
                 reply = safe_get_content(response)
-                await bot.send_message(chat_id=chat_id, text=reply)
+                await send_long_message(message, reply)
             except Exception as e:
                 logging.error(f"Ошибка вклинивания: {e}")
             finally:
@@ -355,7 +364,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                 })
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-6.1-sol" # Используем умную модель для зрения
+                model_to_use = "gpt-6.1-sol" 
             else:
                 logging.info("ОТПРАВЛЯЮ ТЕКСТОВЫЙ ЗАПРОС...")
                 messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
