@@ -351,7 +351,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
                 })
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-6.1-sol" # Убедитесь, что эта модель поддерживает Vision
+                model_to_use = "gpt-4o" # Используем стандартную Vision-модель
             else:
                 messages = [{"role": "system", "content": agent["prompt"]}] + safe_history
                 messages.append({"role": "user", "content": final_text})
@@ -370,14 +370,14 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
         except Exception as e:
             logging.exception("Ошибка API")
-            # ВЫВОДИМ ОШИБКУ, ЧТОБЫ ПОНЯТЬ, ПОЧЕМУ УПАЛО
-            await message.reply(f"Ошибка при обработке: {str(e)[:150]}")
+            await message.reply(f"Ошибка API: {str(e)[:150]}")
         finally:
             typing_task.cancel()
 
 # --- ОБРАБОТЧИК ГОЛОСОВЫХ ---
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
+    logging.info(f"!!! ПОЛУЧЕНО ГОЛОСОВОЕ ОТ {message.from_user.id} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
@@ -414,7 +414,7 @@ async def handle_voice(message: types.Message):
         
     except Exception as e:
         logging.error(f"Voice error: {e}")
-        await message.reply("Не удалось распознать голосовое сообщение.")
+        await message.reply(f"Не удалось распознать голосовое. Ошибка: {str(e)[:50]}")
     finally:
         if not typing_task.cancelled():
             typing_task.cancel()
@@ -422,6 +422,7 @@ async def handle_voice(message: types.Message):
 # --- ОБРАБОТЧИК ФОТО ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
+    logging.info(f"!!! ПОЛУЧЕНО ФОТО ОТ {message.from_user.id} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
@@ -437,7 +438,6 @@ async def handle_photo(message: types.Message):
         is_forwarded = message.forward_origin is not None
         
         async with user_locks[key]:
-            # ВАЖНО: Убрали проверку кулдауна отсюда, так как она есть внутри process_aggregated_text
             await process_aggregated_text(message, caption, is_reply_to_bot_check(message), is_forwarded, image_b64=img_b64)
             
     except Exception as e:
@@ -447,6 +447,7 @@ async def handle_photo(message: types.Message):
 # --- ОБРАБОТЧИК ФАЙЛОВ ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
+    logging.info(f"!!! ПОЛУЧЕН ДОКУМЕНТ: {message.document.file_name} !!!")
     if not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
@@ -457,9 +458,13 @@ async def handle_document(message: types.Message):
         await message.reply("Файл слишком большой (больше 1 МБ). Пришлите поменьше.")
         return
 
-    allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md']
+    allowed_extensions = ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.jpg', '.jpeg', '.png']
     if os.path.splitext(filename)[1].lower() not in allowed_extensions:
-        await message.reply("Я понимаю только код и текст.")
+        await message.reply("Я понимаю только код, текст и картинки.")
+        return
+
+    if os.path.splitext(filename)[1].lower() in ['.jpg', '.jpeg', '.png']:
+        await message.reply("Ты прислал картинку как файл. Я пока умею читать только те, что отправлены как обычное фото.")
         return
 
     typing_task = asyncio.create_task(keep_typing(chat_id))
@@ -509,6 +514,7 @@ async def cmd_start(message: types.Message):
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
+    logging.info(f"!!! ПОЛУЧЕН ТЕКСТ ОТ {message.from_user.id}: {message.text[:50]} !!!")
     if not message.text or not message.from_user: return
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
