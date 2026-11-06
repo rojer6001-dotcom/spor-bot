@@ -49,6 +49,7 @@ FILE_TTL_SECONDS = 600
 MAX_PARALLEL_REQUESTS = 3
 CHANCE_TO_JOIN_CHAT = 0.1 
 CHAT_JOIN_COOLDOWN = 300 
+CHANCE_TO_COMMENT_NEWS = 0.3 # <-- 30% шанс комментировать новости/репосты
 
 api_semaphore = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
 user_locks = defaultdict(asyncio.Lock)
@@ -117,7 +118,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (ОБНОВЛЕННЫЕ ПРОМПТЫ) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -240,7 +241,6 @@ def decode_text(data: bytes) -> str:
     try: return data.decode("utf-8-sig")
     except: return data.decode("cp1251", errors="replace")
 
-# ОБНОВЛЕННАЯ ФУНКЦИЯ БЕЗОПАСНОСТИ
 def safe_get_content(response) -> str | None:
     try:
         if not response or not response.choices or not response.choices[0].message.content:
@@ -328,6 +328,15 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_reminder_delete = any(trigger in text_lower for trigger in REMINDER_DELETE_TRIGGERS)
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
+
+    # --- НОВАЯ ЛОГИКА: РАНДОМ ДЛЯ НОВОСТЕЙ И РЕПОСТОВ ---
+    # Если это новость/политика/репост, и к боту НЕ обращаются напрямую
+    if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
+        if random.random() > CHANCE_TO_COMMENT_NEWS:
+            logging.info("Пропускаю комментирование новости (рандом не выпал)")
+            return
+    # -------------------------------------------------------
+
     if is_political_request: 
         pass
     if is_music_request: 
@@ -464,7 +473,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 max_tok = 1500
             elif is_political_request:
                 agent = AGENTS["political"]
-                # Если это реплай на новость, не ищем в Tavily, а просто отвечаем на текст
                 if message.reply_to_message:
                     final_text = f"Пользователь комментирует новость словами: \"{text}\".\nОтветь на его комментарий коротко и по-дружески."
                 else:
