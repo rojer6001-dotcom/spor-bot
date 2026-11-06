@@ -117,7 +117,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ ---
+# --- АГЕНТЫ (БЕЗ МОДЕЛИ DRAW) ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -126,7 +126,8 @@ AGENTS = {
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. НЕ ПИШИ ПОЭМЫ. "
             "Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
             "Если пользователь стебется над твоим предыдущим ответом: не защищайся. Ответь «Не читай» или «Пошел нахуй». Ты выше этого. "
-            "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры."
+            "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
+            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — скажи, что рисование отключили, чтобы экономить деньги."
         ),
         "model": "deepseek-v4.1-flash"
     },
@@ -137,10 +138,6 @@ AGENTS = {
     "political": {
         "prompt": "Ты — Нафаня. Ты обсуждаешь политические новости с другом на кухне. Дай краткую оценку (2-3 предложения) ПРОСТЫМ языком. Если собеседник переходит на оскорбления — можешь жестко поставить его на место, используя крепкие выражения, но коротко.",
         "model": "gpt-6.1-sol"
-    },
-    "draw": {
-        "prompt": "Ты извлекаешь суть для рисования. Верни ТОЛЬКО текст промпта на английском или русском. Убери лишние слова.",
-        "model": "deepseek-v4.1-flash"
     }
 }
 
@@ -245,9 +242,8 @@ def safe_get_content(response) -> str:
 def is_reply_to_bot_check(message: types.Message) -> bool:
     return bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
 
-# --- ТРИГГЕРЫ ---
+# --- ТРИГГЕРЫ (БЕЗ DRAW_TRIGGERS) ---
 TRIGGERS = ["нафаня", "фаня", "нафанечка", "нафанька", "домовенок", "домовой"]
-DRAW_TRIGGERS = ["нарисуй", "сгенерируй", "изобрази", "картинк", "фотк", "фото", "изображени"] 
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
 DETAIL_TRIGGERS = ["подробнее", "разверни", "расскажи больше", "приведи пруфы", "обоснуй", "детали"]
@@ -259,7 +255,6 @@ REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоми�
 
 # Регулярка для приветствий (клубничка) и список эмодзи
 GREETING_REGEX = re.compile(r'\b(привет|здравствуйте|хай|ку|доброе утро|добрый день|добрый вечер|приветствую|здорово|салют)\b', re.IGNORECASE)
-# ОБНОВЛЕННЫЙ СПИСОК РЕАКЦИЙ: 🥰, ❤️, 🤝, 🍓
 GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
 
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
@@ -313,7 +308,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
-    is_draw_request = any(trigger in text_lower for trigger in DRAW_TRIGGERS) and not image_b64
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
     is_political_request = any(trigger in text_lower for trigger in POLITICAL_TRIGGERS)
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
@@ -324,10 +318,9 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_reminder_delete = any(trigger in text_lower for trigger in REMINDER_DELETE_TRIGGERS)
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
-    if is_code_request: is_draw_request = False
-    if is_political_request: is_draw_request = False
+    if is_political_request: 
+        pass
     if is_music_request: 
-        is_draw_request = False
         is_code_request = False
         is_political_request = False
 
@@ -425,29 +418,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             except Exception: await message.reply("Ошибка создания напоминания.")
             finally: typing_task.cancel()
             return
-
-        # --- РИСОВАНИЕ ---
-        if is_draw_request:
-            agent = AGENTS["draw"]
-            typing_task = asyncio.create_task(keep_typing(chat_id))
-            try:
-                async with api_semaphore:
-                    extract_response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": text}], temperature=0.1, max_tokens=60)
-                clean_prompt = safe_get_content(extract_response).strip()
-                async with api_semaphore:
-                    response = await client.images.generate(model="z-image-turbo", prompt=clean_prompt, n=1, size="1024x1024")
-                if not response.data: raise RuntimeError("Пустой ответ")
-                image_data = response.data[0]
-                photo_to_send = None
-                if image_data.url:
-                    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as http_client:
-                        img_response = await http_client.get(image_data.url)
-                        if img_response.status_code == 200: photo_to_send = BufferedInputFile(img_response.content, filename="image.jpg")
-                elif image_data.b64_json: photo_to_send = BufferedInputFile(base64.b64decode(image_data.b64_json), filename="image.jpg")
-                if photo_to_send: await message.reply_photo(photo=photo_to_send, caption=f"Вот что получилось. Промпт: {clean_prompt}")
-            except Exception as e: await message.reply(f"Не получилось сгенерировать картинку.")
-            finally: typing_task.cancel()
-            return 
 
         # --- ТЕКСТ ---
         history = await get_user_history(chat_id, user_id)
@@ -589,7 +559,7 @@ async def handle_document(message: types.Message):
 # --- ТЕКСТ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я — Нафаня. Могу ответить на вопросы, разобрать код, найти музыку, сгенерировать картинку, понять фото/голосовые и поставить напоминание. Спрашивай.")
+    await message.answer("Привет! Я — Нафаня. Могу ответить на вопросы, разобрать код, найти музыку, понять фото/голосовые и поставить напоминание. (Рисование отключено для экономии). Спрашивай.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -598,15 +568,14 @@ async def handle_message(message: types.Message):
     key = (chat_id, user_id)
     if message.text.startswith('/'): return
 
-    # --- НОВАЯ ЛОГИКА: РАНДОМНАЯ РЕАКЦИЯ НА ПРИВЕТСТВИЯ ---
+    # --- РАНДОМНАЯ РЕАКЦИЯ НА ПРИВЕТСТВИЯ ---
     if GREETING_REGEX.search(message.text):
         try:
-            # Выбираем случайную реакцию из списка 🥰, ❤️, 🤝, 🍓
             random_reaction = random.choice(GREETING_REACTIONS)
             await message.react([types.ReactionTypeEmoji(emoji=random_reaction)])
         except Exception as e:
-            logging.warning(f"Не удалось поставить реакцию (возможно, нет прав): {e}")
-    # --------------------------------------------------------
+            logging.warning(f"Не удалось поставить реакцию: {e}")
+    # -----------------------------------------
     
     async with pending_files_locks[key]:
         if key in pending_files:
