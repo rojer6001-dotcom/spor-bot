@@ -49,7 +49,7 @@ FILE_TTL_SECONDS = 600
 MAX_PARALLEL_REQUESTS = 3
 CHANCE_TO_JOIN_CHAT = 0.1 
 CHAT_JOIN_COOLDOWN = 300 
-CHANCE_TO_COMMENT_NEWS = 0.3 # <-- 30% шанс комментировать новости/репосты
+CHANCE_TO_COMMENT_NEWS = 0.3 
 
 api_semaphore = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
 user_locks = defaultdict(asyncio.Lock)
@@ -263,9 +263,12 @@ REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "с
 REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
 REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоминание", "отмени напоминание", "убери таймер", "удали все напоминания", "отмени все таймеры"]
 
-# Регулярка для приветствий (клубничка) и список эмодзи
+# Регулярка для приветствий и список эмодзи
 GREETING_REGEX = re.compile(r'\b(привет|приветик|здравствуйте|хай|ку|доброе утро|утро доброе|добрый день|день добрый|добрый вечер|вечер добрый|приветствую|здорово|салют|здарова)\b', re.IGNORECASE)
 GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
+
+# Реакции на гифки
+ANIMATION_REACTIONS = ["😹", "🤣", "🔥", "💯", "Ору", "Ржака", "Смешно", "Ахаха", "Ну ты выдал"]
 
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
 async def reminder_worker():
@@ -329,13 +332,10 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
 
-    # --- НОВАЯ ЛОГИКА: РАНДОМ ДЛЯ НОВОСТЕЙ И РЕПОСТОВ ---
-    # Если это новость/политика/репост, и к боту НЕ обращаются напрямую
+    # Рандом для новостей
     if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
         if random.random() > CHANCE_TO_COMMENT_NEWS:
-            logging.info("Пропускаю комментирование новости (рандом не выпал)")
             return
-    # -------------------------------------------------------
 
     if is_political_request: 
         pass
@@ -486,7 +486,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 80 # ЖЕСТКОЕ ОГРАНИЧЕНИЕ ДЛИНЫ
+                max_tok = 80 
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
@@ -528,6 +528,20 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 await message.reply("Произошла ошибка при обработке запроса.")
         finally:
             typing_task.cancel()
+
+# --- НОВЫЙ ОБРАБОТЧИК ГИФОК ---
+@dp.message(F.animation)
+async def handle_animation(message: types.Message):
+    if not message.from_user: return
+    # На гифку просто реагируем смешным эмодзи или короткой фразой
+    try:
+        reaction = random.choice(ANIMATION_REACTIONS)
+        if len(reaction) <= 2: # Если это эмодзи
+            await message.react([types.ReactionTypeEmoji(emoji=reaction)])
+        else:
+            await message.reply(reaction)
+    except Exception:
+        pass
 
 # --- ОБРАБОТЧИКИ МЕДИА ---
 @dp.message(F.voice)
@@ -584,9 +598,19 @@ async def handle_document(message: types.Message):
     user_id, chat_id = message.from_user.id, message.chat.id
     document = message.document
     filename = document.file_name or "file.txt"
-    if document.file_size and document.file_size > 1024 * 1024: await message.reply("Файл больше 1 МБ."); return
-    if os.path.splitext(filename)[1].lower() not in ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.jpg', '.jpeg', '.png']: await message.reply("Я понимаю только код и текст."); return
-    if os.path.splitext(filename)[1].lower() in ['.jpg', '.jpeg', '.png']: await message.reply("Пришли картинку как обычное фото."); return
+    
+    # Меняем сообщение об ошибке на более дружелюбное
+    if document.file_size and document.file_size > 1024 * 1024: 
+        await message.reply("Слышь, файл больно жирный (больше 1 МБ). Я такое не переварю, пришли что-нибудь полегче.")
+        return
+        
+    if os.path.splitext(filename)[1].lower() not in ['.py', '.txt', '.js', '.ts', '.html', '.css', '.json', '.md', '.jpg', '.jpeg', '.png']: 
+        await message.reply("Это что за дичь? Я понимаю только код и текст.")
+        return
+        
+    if os.path.splitext(filename)[1].lower() in ['.jpg', '.jpeg', '.png']: 
+        await message.reply("Пришли картинку как обычное фото, а не файлом.")
+        return
 
     typing_task = asyncio.create_task(keep_typing(chat_id))
     try:
