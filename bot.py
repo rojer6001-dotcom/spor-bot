@@ -117,7 +117,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (БЕЗ МОДЕЛИ DRAW) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -242,7 +242,7 @@ def safe_get_content(response) -> str:
 def is_reply_to_bot_check(message: types.Message) -> bool:
     return bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
 
-# --- ТРИГГЕРЫ (БЕЗ DRAW_TRIGGERS) ---
+# --- ТРИГГЕРЫ ---
 TRIGGERS = ["нафаня", "фаня", "нафанечка", "нафанька", "домовенок", "домовой"]
 CODE_TRIGGERS = ["ошибка", "баг", "traceback", "exception", "почему не работает", "исправь", "ревью", "код", "кодить", "программ", "def ", "import ", "```", "<html", "</div>"]
 POLITICAL_TRIGGERS = ["политик", "дебат", "выборы", "конфликт", "закон", "санкции", "война", "мир", "анализ ситуации"]
@@ -253,8 +253,8 @@ REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "с
 REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
 REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоминание", "отмени напоминание", "убери таймер", "удали все напоминания", "отмени все таймеры"]
 
-# Регулярка для приветствий (клубничка) и список эмодзи
-GREETING_REGEX = re.compile(r'\b(привет|здравствуйте|хай|ку|доброе утро|добрый день|добрый вечер|приветствую|здорово|салют)\b', re.IGNORECASE)
+# ОБНОВЛЕННАЯ РЕГУЛЯРКА: добавлены перевернутые фразы и сленг
+GREETING_REGEX = re.compile(r'\b(привет|приветик|здравствуйте|хай|ку|доброе утро|утро доброе|добрый день|день добрый|добрый вечер|вечер добрый|приветствую|здорово|салют|здарова)\b', re.IGNORECASE)
 GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
 
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
