@@ -117,7 +117,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (СМЯГЧЕННЫЙ ПРОМПТ) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -256,6 +256,9 @@ MUSIC_TRIGGERS = ["найди песню", "включи музыку", "пои�
 REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "создай напоминание", "напоминание на"]
 REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
 REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоминание", "отмени напоминание", "убери таймер", "удали все напоминания", "отмени все таймеры"]
+
+# Регулярка для приветствий (клубничка)
+GREETING_REGEX = re.compile(r'\b(привет|здравствуйте|хай|ку|доброе утро|добрый день|добрый вечер|приветствую|здорово|салют)\b', re.IGNORECASE)
 
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
 async def reminder_worker():
@@ -593,6 +596,14 @@ async def handle_message(message: types.Message):
     user_id, chat_id = message.from_user.id, message.chat.id
     key = (chat_id, user_id)
     if message.text.startswith('/'): return
+
+    # --- НОВАЯ ЛОГИКА: РЕАКЦИЯ НА ПРИВЕТСТВИЯ ---
+    if GREETING_REGEX.search(message.text):
+        try:
+            await message.react([types.ReactionTypeEmoji(emoji="🍓")])
+        except Exception as e:
+            logging.warning(f"Не удалось поставить реакцию (возможно, нет прав): {e}")
+    # ---------------------------------------------
     
     async with pending_files_locks[key]:
         if key in pending_files:
