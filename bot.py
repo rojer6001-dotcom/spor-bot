@@ -117,12 +117,13 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (ОБНОВЛЕННЫЕ ПРОМПТЫ) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": (
             "Ты — Нафаня, обычный живой человек. Твоя главная задача — общаться кратко. "
             "КАТЕГОРИЧЕСКИЙ ЗАПРЕТ на длинные абзацы, нотации и оправдания. Максимум — 1-2 предложения.\n"
+            "Если к тебе обращаются просто по имени (например, 'Фаня' или 'Нафаня'), отвечай коротко в зависимости от контекста: 'Чё?', 'Слушаю', 'Да?', 'Чего тебе?'.\n"
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. НЕ ПИШИ ПОЭМЫ. "
             "Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
             "Если пользователь стебется над твоим предыдущим ответом: не защищайся. Ответь «Не читай» или «Пошел нахуй». Ты выше этого. "
@@ -239,10 +240,14 @@ def decode_text(data: bytes) -> str:
     try: return data.decode("utf-8-sig")
     except: return data.decode("cp1251", errors="replace")
 
-def safe_get_content(response) -> str:
-    if not response or not response.choices or not response.choices[0].message.content:
-        raise RuntimeError("Пустой ответ")
-    return response.choices[0].message.content
+# ОБНОВЛЕННАЯ ФУНКЦИЯ БЕЗОПАСНОСТИ
+def safe_get_content(response) -> str | None:
+    try:
+        if not response or not response.choices or not response.choices[0].message.content:
+            return None
+        return response.choices[0].message.content
+    except Exception:
+        return None
 
 def is_reply_to_bot_check(message: types.Message) -> bool:
     return bool(message.reply_to_message and message.reply_to_message.from_user and message.reply_to_message.from_user.id == bot.id)
@@ -345,7 +350,12 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             try:
                 async with api_semaphore:
                     response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=80)
-                await send_long_message(message, safe_get_content(response))
+                
+                reply = safe_get_content(response)
+                if reply:
+                    await send_long_message(message, reply)
+                else:
+                    await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
             except Exception as e: logging.error(f"Ошибка вклинивания: {e}")
             finally: typing_task.cancel()
         return 
@@ -363,8 +373,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 extract_prompt = f"Из запроса пользователя вычлени только исполнителя и название песни для поиска. Верни ТОЛЬКО поисковый запрос. Запрос: '{text}'"
                 async with api_semaphore:
                     extract_response = await client.chat.completions.create(model="deepseek-v4.1-flash", messages=[{"role": "user", "content": extract_prompt}], temperature=0.1, max_tokens=50)
-                search_query = safe_get_content(extract_response).strip()
-                track = await search_jamendo(search_query)
+                search_query = safe_get_content(extract_response)
+                
+                if not search_query:
+                    await message.reply("Чё-то я не понял, какую песню искать. Скажи нормально.")
+                    return
+
+                track = await search_jamendo(search_query.strip())
                 if track and track.get("audio_url"):
                     await message.reply_audio(audio=track["audio_url"], title=track["name"], performer=track["artist"], caption=f"Нашел трек: **{track['name']}** — {track['artist']}")
                 else:
@@ -393,7 +408,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 parse_prompt = f"Пользователь пишет: '{text}'. Он хочет удалить напоминание. Если хочет удалить ВСЕ, верни JSON: {{\"delete_all\": true}}. Если конкретное, выдели слово и верни JSON: {{\"query\": \"слово\"}}. Ответь СТРОГО JSON."
                 async with api_semaphore:
                     parse_response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "user", "content": parse_prompt}], temperature=0.1, max_tokens=50)
-                data = json.loads(re.sub(r'```json|```', '', safe_get_content(parse_response)).strip())
+                
+                raw_json = safe_get_content(parse_response)
+                if not raw_json:
+                    await message.reply("Не понял, чё удалять.")
+                    return
+                
+                data = json.loads(re.sub(r'```json|```', '', raw_json).strip())
                 if data.get("delete_all"):
                     await delete_reminders_by_query(chat_id, user_id, None)
                     await message.reply("Хорошо, я удалил **все** твои напоминания.")
@@ -412,7 +433,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 parse_prompt = f"Текущее время: {current_time} (Москва). Пользователь просит: '{text}'. Выдели текст и время. Ответь JSON: {{\"text\": \"что\", \"datetime_str\": \"YYYY-MM-DD HH:MM\"}}. Если нет времени: {{\"error\": \"no_time\"}}"
                 async with api_semaphore:
                     parse_response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "user", "content": parse_prompt}], temperature=0.1, max_tokens=100)
-                data = json.loads(re.sub(r'```json|```', '', safe_get_content(parse_response)).strip())
+                
+                raw_json = safe_get_content(parse_response)
+                if not raw_json:
+                    await message.reply("Чё-то я завис. Повтори, на какое время напомнить.")
+                    return
+                
+                data = json.loads(re.sub(r'```json|```', '', raw_json).strip())
                 if "error" in data: await message.reply("Я не понял время. Уточни (например: 'через 10 минут')."); return
                 rem_datetime = datetime.strptime(data["datetime_str"], "%Y-%m-%d %H:%M")
                 if rem_datetime <= get_moscow_datetime_obj(): await message.reply("Это время уже прошло."); return
@@ -438,7 +465,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             elif is_political_request:
                 agent = AGENTS["political"]
                 search_results = await search_tavily(text)
-                # Если пользователь переслал новость с комментарием, акцентируем внимание на комментарии
                 if is_forwarded and message.text:
                     final_text = f"Пользователь переслал новость: \"{message.text}\".\nДанные из поиска: {search_results}\nОтветь на его комментарий к новости в виде короткой шутки или мнения."
                 else:
@@ -471,9 +497,18 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     max_tokens=max_tok
                 )
             
+            # БЕЗОПАСНАЯ ОБРАБОТКА ОТВЕТА
             bot_reply = safe_get_content(response)
-            await send_long_message(message, bot_reply)
-            await save_user_message(chat_id, user_id, "assistant", bot_reply)
+            
+            if bot_reply:
+                await send_long_message(message, bot_reply)
+                await save_user_message(chat_id, user_id, "assistant", bot_reply)
+            else:
+                # Если ответ пустой (сработал фильтр или глюк), отвечаем от себя
+                if is_political_request:
+                     await message.reply("Слушай, у меня нет слов. Давай сменим тему.")
+                else:
+                     await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
             
         except Exception as e:
             error_str = str(e).lower()
@@ -529,7 +564,9 @@ async def handle_photo(message: types.Message):
         else:
             async with api_semaphore:
                 response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": "Опиши картинку кратко."}, {"role": "user", "content": [{"type": "text", "text": "Что тут?"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}], temperature=0.5, max_tokens=100)
-            await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем: {safe_get_content(response)}]")
+            desc = safe_get_content(response)
+            if desc:
+                await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем: {desc}]")
             try: await message.react([types.ReactionTypeEmoji(emoji="👀")])
             except: pass
     except Exception as e: await message.reply("Не удалось обработать фото.")
@@ -559,9 +596,13 @@ async def handle_document(message: types.Message):
         
         async with api_semaphore:
             response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": AGENTS["code"]["prompt"] + f"\nТекущее время: {get_moscow_time()}"}, {"role": "user", "content": f"Файл '{filename}'. Задача: '{message.caption}'.\n\nКод:\n\n{code_text}"}], temperature=0.7, max_tokens=1500)
+        
         bot_reply = safe_get_content(response)
-        await send_long_message(message, bot_reply)
-        await save_user_message(chat_id, user_id, "assistant", bot_reply)
+        if bot_reply:
+            await send_long_message(message, bot_reply)
+            await save_user_message(chat_id, user_id, "assistant", bot_reply)
+        else:
+            await message.reply("Не могу проанализировать файл, движок вернул пустоту.")
     except Exception: await message.reply("Не удалось прочитать файл.")
     finally: typing_task.cancel()
 
@@ -597,8 +638,13 @@ async def handle_message(message: types.Message):
                 try:
                     async with api_semaphore:
                         response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": AGENTS["code"]["prompt"] + f"\nТекущее время: {get_moscow_time()}"}, {"role": "user", "content": f"Файл '{file_data['filename']}'. Задача: '{message.text}'.\n\nКод:\n\n{file_data['text']}"}], temperature=0.7, max_tokens=1500)
-                    await send_long_message(message, safe_get_content(response))
-                    await save_user_message(chat_id, user_id, "assistant", safe_get_content(response))
+                    
+                    bot_reply = safe_get_content(response)
+                    if bot_reply:
+                        await send_long_message(message, bot_reply)
+                        await save_user_message(chat_id, user_id, "assistant", bot_reply)
+                    else:
+                        await message.reply("Движок вернул пустоту. Попробуй еще раз.")
                     pending_files.pop(key, None)
                 except Exception: await message.reply("Ошибка при обработке файла.")
                 finally: typing_task.cancel()
