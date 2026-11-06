@@ -257,8 +257,10 @@ REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "с
 REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
 REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоминание", "отмени напоминание", "убери таймер", "удали все напоминания", "отмени все таймеры"]
 
-# Регулярка для приветствий (клубничка)
+# Регулярка для приветствий (клубничка) и список эмодзи
 GREETING_REGEX = re.compile(r'\b(привет|здравствуйте|хай|ку|доброе утро|добрый день|добрый вечер|приветствую|здорово|салют)\b', re.IGNORECASE)
+# ОБНОВЛЕННЫЙ СПИСОК РЕАКЦИЙ: 🥰, ❤️, 🤝, 🍓
+GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
 
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
 async def reminder_worker():
@@ -494,7 +496,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             await send_long_message(message, bot_reply)
             await save_user_message(chat_id, user_id, "assistant", bot_reply)
             
-        # ИСПРАВЛЕННЫЙ БЛОК EXCEPT
         except Exception as e:
             error_str = str(e).lower()
             logging.exception("Ошибка API")
@@ -597,13 +598,15 @@ async def handle_message(message: types.Message):
     key = (chat_id, user_id)
     if message.text.startswith('/'): return
 
-    # --- НОВАЯ ЛОГИКА: РЕАКЦИЯ НА ПРИВЕТСТВИЯ ---
+    # --- НОВАЯ ЛОГИКА: РАНДОМНАЯ РЕАКЦИЯ НА ПРИВЕТСТВИЯ ---
     if GREETING_REGEX.search(message.text):
         try:
-            await message.react([types.ReactionTypeEmoji(emoji="🍓")])
+            # Выбираем случайную реакцию из списка 🥰, ❤️, 🤝, 🍓
+            random_reaction = random.choice(GREETING_REACTIONS)
+            await message.react([types.ReactionTypeEmoji(emoji=random_reaction)])
         except Exception as e:
             logging.warning(f"Не удалось поставить реакцию (возможно, нет прав): {e}")
-    # ---------------------------------------------
+    # --------------------------------------------------------
     
     async with pending_files_locks[key]:
         if key in pending_files:
