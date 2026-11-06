@@ -117,7 +117,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (ЖЕСТКИЙ ПРОМПТ ПРОТИВ ТРОЛЛИНГА) ---
+# --- АГЕНТЫ (СМЯГЧЕННЫЙ ПРОМПТ) ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -125,8 +125,8 @@ AGENTS = {
             "КАТЕГОРИЧЕСКИЙ ЗАПРЕТ на длинные абзацы, нотации и оправдания. Максимум — 1-2 предложения.\n"
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. НЕ ПИШИ ПОЭМЫ. "
             "Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
-            "Если пользователь стебется над твоим предыдущим ответом (например, спрашивает «Зачем так много текста?»): не защищайся. "
-            "Ответь «Не читай» или «Пошел нахуй». Ты выше этого."
+            "Если пользователь стебется над твоим предыдущим ответом: не защищайся. Ответь «Не читай» или «Пошел нахуй». Ты выше этого. "
+            "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры."
         ),
         "model": "deepseek-v4.1-flash"
     },
@@ -467,7 +467,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 60 # ЖЕСТКОЕ ОГРАНИЧЕНИЕ ДЛИНЫ
+                max_tok = 80 # ЖЕСТКОЕ ОГРАНИЧЕНИЕ ДЛИНЫ
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
@@ -484,14 +484,20 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     model=model_to_use, 
                     messages=messages, 
                     temperature=temp,
-                    max_tokens=max_tok # ОГРАНИЧЕНИЕ ДЛИНЫ
+                    max_tokens=max_tok
                 )
             
             bot_reply = safe_get_content(response)
             await send_long_message(message, bot_reply)
             await save_user_message(chat_id, user_id, "assistant", bot_reply)
+            
+        # ИСПРАВЛЕННЫЙ БЛОК EXCEPT
         except Exception as e:
-            if "connection" in str(e).lower() or "timeout" in str(e).lower():
+            error_str = str(e).lower()
+            logging.exception("Ошибка API")
+            if "content_policy" in error_str or "safety" in error_str or "400" in error_str:
+                await message.reply("Ой, кажется, я перегнул палку с матом, и меня заблокировали фильтры безопасности. Давай сменим тему, а? 😅")
+            elif "connection" in error_str or "timeout" in error_str:
                 await message.reply("Ой, кажется, у меня пропала связь с сервером. Попробуй отправить сообщение еще раз через минуту.")
             else:
                 await message.reply("Произошла ошибка при обработке запроса.")
