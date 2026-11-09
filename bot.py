@@ -9,6 +9,7 @@ import codecs
 import time
 import io
 import httpx
+import subprocess
 from datetime import datetime, timedelta
 from collections import defaultdict
 from difflib import get_close_matches
@@ -118,7 +119,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ ---
+# --- АГЕНТЫ (С ПРАВИЛОМ ЗАКАНЧИВАТЬ МЫСЛЬ) ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -129,12 +130,12 @@ AGENTS = {
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
             "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
             "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
-            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись."
+            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова."
         ),
         "model": "deepseek-v4.1-flash"
     },
     "code": {
-        "prompt": "Ты — Нафаня, опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Пиши только то, что поможет решить проблему.",
+        "prompt": "Ты — Нафаня, опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Пиши только то, что поможет решить проблему. Всегда заканчивай мысль.",
         "model": "gpt-6.1-sol"
     },
     "political": {
@@ -142,7 +143,7 @@ AGENTS = {
             "Ты — Нафаня. Ты обсуждаешь новости с другом. Твоя задача — реагировать на комментарий пользователя к новости, а не анализировать саму новость. "
             "Если пользователь шутит (например: 'довыебывался?'), ответь коротко и с иронией (например: 'Ага, доигрался'). "
             "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать фразы вроде «актуальность лучше уточнить», «на скриншоте репост», «это важная разница». "
-            "Отвечай как живой человек: коротко (1-2 предложения). Никакой политологической воды."
+            "Отвечай как живой человек: коротко (1-3 предложения). Никакой политологической воды. Всегда заканчивай мысль, не обрывай предложения на полуслове."
         ),
         "model": "gpt-6.1-sol"
     }
@@ -270,6 +271,33 @@ GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
 # Реакции на гифки
 ANIMATION_REACTIONS = ["😹", "🤣", "🔥", "💯", "Ору", "Ржака", "Смешно", "Ахаха", "Ну ты выдал"]
 
+# --- ФУНКЦИЯ ИЗВЛЕЧЕНИЯ КАДРОВ ИЗ ГИФКИ ---
+async def extract_gif_frames(gif_data: bytes, num_frames: int = 3) -> list[bytes]:
+    temp_in = f"/tmp/gif_{int(time.time())}.gif"
+    with open(temp_in, "wb") as f:
+        f.write(gif_data)
+    frames = []
+    try:
+        probe_cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", temp_in]
+        duration_str = subprocess.check_output(probe_cmd).decode().strip()
+        duration = float(duration_str) if duration_str else 0
+        if duration > 0:
+            timestamps = [duration * (i + 0.5) / num_frames for i in range(num_frames)]
+        else:
+            timestamps = [i for i in range(num_frames)]
+        for ts in timestamps:
+            temp_out = f"/tmp/frame_{int(time.time()*1000)}_{ts}.jpg"
+            ffmpeg_cmd = ["ffmpeg", "-ss", str(ts), "-i", temp_in, "-vframes", "1", "-q:v", "2", "-y", temp_out]
+            subprocess.run(ffmpeg_cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            with open(temp_out, "rb") as f:
+                frames.append(f.read())
+            os.remove(temp_out)
+    except Exception as e:
+        logging.error(f"Ошибка извлечения кадров: {e}")
+    finally:
+        if os.path.exists(temp_in): os.remove(temp_in)
+    return frames
+
 # --- ФОНОВЫЙ ТАЙМЕР НАПОМИНАНИЙ ---
 async def reminder_worker():
     logging.info("Таймер напоминаний запущен.")
@@ -285,7 +313,6 @@ async def reminder_worker():
                         formatted_rem = format_text(f"🔔 **Напоминаю:**\n{rem.text}")
                         await bot.send_message(chat_id=rem.chat_id, text=formatted_rem, parse_mode="HTML")
                     except Exception as e:
-                        logging.error(f"Не удалось отправить напоминание в {rem.chat_id}: {e}")
                         await bot.send_message(chat_id=rem.chat_id, text=f"🔔 Напоминаю:\n{rem.text}")
                     await session.delete(rem)
                 await session.commit()
@@ -303,7 +330,7 @@ async def delayed_process(key: tuple):
         logging.exception("Ошибка буфера")
         await data["message"].reply("Что-то пошло не так. Попробуй еще раз.")
 
-async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool, image_b64: str = None):
+async def process_aggregated_text(message: types.Message, text: str, is_reply_to_bot: bool, is_forwarded: bool, image_b64: str = None, frames_b64: list[str] = None):
     if not message.from_user: return 
     user_id = message.from_user.id
     chat_id = message.chat.id
@@ -317,7 +344,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     words = text_lower.split()
     sender_name = message.from_user.first_name or "Кто-то"
     
-    if not image_b64:
+    if not image_b64 and not frames_b64:
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
@@ -332,7 +359,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
 
-    # Рандом для новостей
     if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
         if random.random() > CHANCE_TO_COMMENT_NEWS:
             return
@@ -345,7 +371,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    if is_group and not image_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete or is_music_request):
+    if is_group and not image_b64 and not frames_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete or is_music_request):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN: return
         if random.random() < CHANCE_TO_JOIN_CHAT:
@@ -358,13 +384,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 async with api_semaphore:
-                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=80)
+                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=100)
                 
                 reply = safe_get_content(response)
-                if reply:
-                    await send_long_message(message, reply)
-                else:
-                    await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
+                if reply: await send_long_message(message, reply)
+                else: await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
             except Exception as e: logging.error(f"Ошибка вклинивания: {e}")
             finally: typing_task.cancel()
         return 
@@ -383,16 +407,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 async with api_semaphore:
                     extract_response = await client.chat.completions.create(model="deepseek-v4.1-flash", messages=[{"role": "user", "content": extract_prompt}], temperature=0.1, max_tokens=50)
                 search_query = safe_get_content(extract_response)
-                
-                if not search_query:
-                    await message.reply("Чё-то я не понял, какую песню искать. Скажи нормально.")
-                    return
-
+                if not search_query: await message.reply("Чё-то я не понял, какую песню искать. Скажи нормально."); return
                 track = await search_jamendo(search_query.strip())
                 if track and track.get("audio_url"):
                     await message.reply_audio(audio=track["audio_url"], title=track["name"], performer=track["artist"], caption=f"Нашел трек: **{track['name']}** — {track['artist']}")
-                else:
-                    await message.reply(f"Не удалось найти трек по запросу «{search_query}».")
+                else: await message.reply(f"Не удалось найти трек по запросу «{search_query}».")
             except Exception: await message.reply("Не удалось найти музыку.")
             finally: typing_task.cancel()
             return
@@ -417,12 +436,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 parse_prompt = f"Пользователь пишет: '{text}'. Он хочет удалить напоминание. Если хочет удалить ВСЕ, верни JSON: {{\"delete_all\": true}}. Если конкретное, выдели слово и верни JSON: {{\"query\": \"слово\"}}. Ответь СТРОГО JSON."
                 async with api_semaphore:
                     parse_response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "user", "content": parse_prompt}], temperature=0.1, max_tokens=50)
-                
                 raw_json = safe_get_content(parse_response)
-                if not raw_json:
-                    await message.reply("Не понял, чё удалять.")
-                    return
-                
+                if not raw_json: await message.reply("Не понял, чё удалять."); return
                 data = json.loads(re.sub(r'```json|```', '', raw_json).strip())
                 if data.get("delete_all"):
                     await delete_reminders_by_query(chat_id, user_id, None)
@@ -442,12 +457,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 parse_prompt = f"Текущее время: {current_time} (Москва). Пользователь просит: '{text}'. Выдели текст и время. Ответь JSON: {{\"text\": \"что\", \"datetime_str\": \"YYYY-MM-DD HH:MM\"}}. Если нет времени: {{\"error\": \"no_time\"}}"
                 async with api_semaphore:
                     parse_response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "user", "content": parse_prompt}], temperature=0.1, max_tokens=100)
-                
                 raw_json = safe_get_content(parse_response)
-                if not raw_json:
-                    await message.reply("Чё-то я завис. Повтори, на какое время напомнить.")
-                    return
-                
+                if not raw_json: await message.reply("Чё-то я завис. Повтори, на какое время напомнить."); return
                 data = json.loads(re.sub(r'```json|```', '', raw_json).strip())
                 if "error" in data: await message.reply("Я не понял время. Уточни (например: 'через 10 минут')."); return
                 rem_datetime = datetime.strptime(data["datetime_str"], "%Y-%m-%d %H:%M")
@@ -480,18 +491,26 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     final_text = f"Тема: \"{text}\"\n\nДанные:\n---\n{search_results}\n---\nДай КРАТКИЙ ответ (1-3 предложения) ПРОСТЫМ языком."
                 temp = 0.7
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 300
+                max_tok = 500 # УВЕЛИЧЕНО ДЛЯ ПОЛИТИКИ
             else:
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 80 
+                max_tok = 120 # УВЕЛИЧЕНО ДЛЯ ЧАТА
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
             
-            if image_b64:
+            if frames_b64:
+                messages = [{"role": "system", "content": active_prompt}]
+                for h in safe_history: messages.append(h)
+                user_content = [{"type": "text", "text": f"Пользователь отправил гифку и спрашивает: {final_text}. Вот несколько кадров из неё:"}]
+                for frame in frames_b64:
+                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}})
+                messages.append({"role": "user", "content": user_content})
+                model_to_use = "gpt-6.1-sol"
+            elif image_b64:
                 messages = [{"role": "system", "content": active_prompt}] + safe_history + [{"role": "user", "content": [{"type": "text", "text": final_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}]
                 model_to_use = "gpt-6.1-sol" 
             else:
@@ -529,21 +548,33 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         finally:
             typing_task.cancel()
 
-# --- НОВЫЙ ОБРАБОТЧИК ГИФОК ---
+# --- ОБРАБОТЧИКИ МЕДИА ---
 @dp.message(F.animation)
 async def handle_animation(message: types.Message):
     if not message.from_user: return
-    # На гифку просто реагируем смешным эмодзи или короткой фразой
+    if message.caption:
+        user_id, chat_id = message.from_user.id, message.chat.id
+        typing_task = asyncio.create_task(keep_typing(chat_id))
+        try:
+            file = await bot.get_file(message.animation.file_id)
+            gif_data = await bot.download_file(file.file_path)
+            gif_bytes = gif_data.read()
+            frames_bytes = await extract_gif_frames(gif_bytes, num_frames=3)
+            frames_b64 = [base64.b64encode(f).decode('utf-8') for f in frames_bytes]
+            if not frames_b64: await message.reply("Не удалось разобрать гифку на кадры."); return
+            await process_aggregated_text(message, message.caption, is_reply_to_bot_check(message), message.forward_origin is not None, frames_b64=frames_b64)
+        except Exception as e:
+            logging.exception("Ошибка обработки гифки")
+            await message.reply("Не удалось обработать гифку.")
+        finally:
+            if not typing_task.cancelled(): typing_task.cancel()
+        return
     try:
         reaction = random.choice(ANIMATION_REACTIONS)
-        if len(reaction) <= 2: # Если это эмодзи
-            await message.react([types.ReactionTypeEmoji(emoji=reaction)])
-        else:
-            await message.reply(reaction)
-    except Exception:
-        pass
+        if len(reaction) <= 2: await message.react([types.ReactionTypeEmoji(emoji=reaction)])
+        else: await message.reply(reaction)
+    except Exception: pass
 
-# --- ОБРАБОТЧИКИ МЕДИА ---
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     if not message.from_user: return
@@ -584,7 +615,7 @@ async def handle_photo(message: types.Message):
             await process_aggregated_text(message, message.caption, is_reply_to_bot_check(message), message.forward_origin is not None, image_b64=img_b64)
         else:
             async with api_semaphore:
-                response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": "Опиши картинку кратко."}, {"role": "user", "content": [{"type": "text", "text": "Что тут?"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}], temperature=0.5, max_tokens=100)
+                response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": "Опиши картинку кратко."}, {"role": "user", "content": [{"type": "text", "text": "Что тут?"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}], temperature=0.5, max_tokens=150)
             desc = safe_get_content(response)
             if desc:
                 await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем: {desc}]")
@@ -598,8 +629,31 @@ async def handle_document(message: types.Message):
     user_id, chat_id = message.from_user.id, message.chat.id
     document = message.document
     filename = document.file_name or "file.txt"
-    
-    # Меняем сообщение об ошибке на более дружелюбное
+    mime_type = document.mime_type or ""
+
+    if "video" in mime_type or "gif" in mime_type or filename.lower().endswith(('.mp4', '.gif')):
+        if message.caption:
+            typing_task = asyncio.create_task(keep_typing(chat_id))
+            try:
+                file = await bot.get_file(document.file_id)
+                gif_data = await bot.download_file(file.file_path)
+                gif_bytes = gif_data.read()
+                frames_bytes = await extract_gif_frames(gif_bytes, num_frames=3)
+                frames_b64 = [base64.b64encode(f).decode('utf-8') for f in frames_bytes]
+                if frames_b64: await process_aggregated_text(message, message.caption, is_reply_to_bot_check(message), message.forward_origin is not None, frames_b64=frames_b64)
+                else: await message.reply("Не удалось разобрать гифку на кадры.")
+            except Exception: await message.reply("Не удалось обработать гифку.")
+            finally:
+                if not typing_task.cancelled(): typing_task.cancel()
+            return
+        else:
+            try:
+                reaction = random.choice(ANIMATION_REACTIONS)
+                if len(reaction) <= 2: await message.react([types.ReactionTypeEmoji(emoji=reaction)])
+                else: await message.reply(reaction)
+            except Exception: pass
+            return
+
     if document.file_size and document.file_size > 1024 * 1024: 
         await message.reply("Слышь, файл больно жирный (больше 1 МБ). Я такое не переварю, пришли что-нибудь полегче.")
         return
@@ -632,15 +686,14 @@ async def handle_document(message: types.Message):
         if bot_reply:
             await send_long_message(message, bot_reply)
             await save_user_message(chat_id, user_id, "assistant", bot_reply)
-        else:
-            await message.reply("Не могу проанализировать файл, движок вернул пустоту.")
+        else: await message.reply("Не могу проанализировать файл, движок вернул пустоту.")
     except Exception: await message.reply("Не удалось прочитать файл.")
     finally: typing_task.cancel()
 
 # --- ТЕКСТ ---
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("Привет! Я — Нафаня. Могу ответить на вопросы, разобрать код, найти музыку, понять фото/голосовые и поставить напоминание. Спрашивай.")
+    await message.answer("Привет! Я — Нафаня. Могу ответить на вопросы, разобрать код, найти музыку, понять фото/голосовые/гифки и поставить напоминание. Спрашивай.")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -649,14 +702,12 @@ async def handle_message(message: types.Message):
     key = (chat_id, user_id)
     if message.text.startswith('/'): return
 
-    # --- РАНДОМНАЯ РЕАКЦИЯ НА ПРИВЕТСТВИЯ ---
     if GREETING_REGEX.search(message.text):
         try:
             random_reaction = random.choice(GREETING_REACTIONS)
             await message.react([types.ReactionTypeEmoji(emoji=random_reaction)])
         except Exception as e:
             logging.warning(f"Не удалось поставить реакцию: {e}")
-    # -----------------------------------------
     
     async with pending_files_locks[key]:
         if key in pending_files:
@@ -674,8 +725,7 @@ async def handle_message(message: types.Message):
                     if bot_reply:
                         await send_long_message(message, bot_reply)
                         await save_user_message(chat_id, user_id, "assistant", bot_reply)
-                    else:
-                        await message.reply("Движок вернул пустоту. Попробуй еще раз.")
+                    else: await message.reply("Движок вернул пустоту. Попробуй еще раз.")
                     pending_files.pop(key, None)
                 except Exception: await message.reply("Ошибка при обработке файла.")
                 finally: typing_task.cancel()
