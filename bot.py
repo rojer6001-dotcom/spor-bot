@@ -83,6 +83,13 @@ class Reminder(Base):
     text: Mapped[str] = mapped_column(Text)
     remind_time: Mapped[datetime] = mapped_column(DateTime, index=True)
 
+class UserFact(Base):
+    __tablename__ = "user_facts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    fact_text: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
 engine = create_async_engine("sqlite+aiosqlite:///bot_memory_v2.db", echo=False)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -119,7 +126,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (С ПРАВИЛОМ ЗАКАНЧИВАТЬ МЫСЛЬ) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "chat": {
         "prompt": (
@@ -187,6 +194,44 @@ async def delete_reminders_by_query(chat_id: int, user_id: int, text_query: str 
             for rem in result.scalars().all(): await session.delete(rem)
         await session.commit()
 
+async def save_user_fact(user_id: int, fact: str):
+    async with async_session() as session:
+        result = await session.execute(select(UserFact).where(UserFact.user_id == user_id, UserFact.fact_text == fact))
+        if not result.scalars().first():
+            session.add(UserFact(user_id=user_id, fact_text=fact))
+            await session.commit()
+
+async def get_user_facts(user_id: int) -> list:
+    async with async_session() as session:
+        result = await session.execute(select(UserFact).where(UserFact.user_id == user_id).order_by(UserFact.created_at.desc()))
+        return [f.fact_text for f in result.scalars().all()]
+
+async def extract_and_save_facts(user_id: int, text: str):
+    extract_prompt = (
+        f"Проанализируй сообщение пользователя: \"{text}\".\n"
+        "Твоя задача — вытащить из него любые долгосрочные факты о пользователе (имя, возраст, профессия, хобби, домашние животные, важные события, предпочтения в еде/музыке и т.д.).\n"
+        "НЕ включай сиюминутные вещи (например, 'я сейчас ем', 'я устал').\n"
+        "Ответь СТРОГО в формате JSON-массива. Если фактов нет, верни пустой массив [].\n"
+        "Пример ответа: {\"facts\": [\"Любит пиццу\", \"Работает программистом\"]}"
+    )
+    try:
+        async with api_semaphore:
+            response = await client.chat.completions.create(
+                model="deepseek-v4.1-flash",
+                messages=[{"role": "user", "content": extract_prompt}],
+                temperature=0.1,
+                max_tokens=150
+            )
+        raw_json = safe_get_content(response)
+        if not raw_json: return
+        raw_json = re.sub(r'```json|```', '', raw_json).strip()
+        data = json.loads(raw_json)
+        facts = data.get("facts", [])
+        for fact in facts:
+            await save_user_fact(user_id, fact)
+    except Exception as e:
+        logging.error(f"Ошибка извлечения фактов: {e}")
+
 async def cleanup_db():
     while True:
         await asyncio.sleep(3600 * 24) 
@@ -194,6 +239,7 @@ async def cleanup_db():
             async with async_session() as session:
                 await session.execute(text("DELETE FROM chat_contexts WHERE id NOT IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY chat_id ORDER BY id DESC) as rn FROM chat_contexts) WHERE rn <= 50)"))
                 await session.execute(text("DELETE FROM reminders WHERE remind_time < :now"), {"now": get_moscow_datetime_obj()})
+                await session.execute(text("DELETE FROM user_facts WHERE created_at < :old_date"), {"old_date": get_moscow_datetime_obj() - timedelta(days=30)})
                 await session.commit()
         except Exception as e:
             logging.error(f"Ошибка очистки БД: {e}")
@@ -340,6 +386,19 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await message.reply(f"Слишком длинный текст ({len(text)} символов). Максимум — {MAX_TEXT_LENGTH}.")
         return
     
+    # --- НОВАЯ ЛОГИКА: ПОДТЯГИВАЕМ ТЕКСТ СООБЩЕНИЯ, НА КОТОРОЕ ОТВЕТИЛИ ---
+    reply_context = ""
+    if message.reply_to_message:
+        replied = message.reply_to_message
+        reply_context = replied.text or replied.caption or ""
+        if reply_context:
+            text = f"[В ответ на сообщение: \"{reply_context}\"]\n{text}"
+    # -------------------------------------------------------------------------
+
+    # Запускаем фоновое извлечение фактов (не блокирует ответ)
+    if text and not image_b64 and not frames_b64:
+        asyncio.create_task(extract_and_save_facts(user_id, text))
+    
     text_lower = text.lower()
     words = text_lower.split()
     sender_name = message.from_user.first_name or "Кто-то"
@@ -385,7 +444,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             try:
                 async with api_semaphore:
                     response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=100)
-                
                 reply = safe_get_content(response)
                 if reply: await send_long_message(message, reply)
                 else: await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
@@ -476,6 +534,12 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         typing_task = asyncio.create_task(keep_typing(chat_id))
         try:
             time_context = f"\n\nВажная информация: Текущая дата и время — {get_moscow_time()}."
+            
+            facts = await get_user_facts(user_id)
+            if facts:
+                facts_str = ", ".join(facts)
+                time_context += f"\nВот что ты знаешь об этом пользователе из прошлых разговоров: {facts_str}. Используй эту информацию, чтобы общаться как старый друг. Но не перечисляй все факты сразу, вставляй их в тему, если это уместно."
+
             if is_code_request:
                 agent = AGENTS["code"]
                 final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
@@ -491,13 +555,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     final_text = f"Тема: \"{text}\"\n\nДанные:\n---\n{search_results}\n---\nДай КРАТКИЙ ответ (1-3 предложения) ПРОСТЫМ языком."
                 temp = 0.7
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 500 # УВЕЛИЧЕНО ДЛЯ ПОЛИТИКИ
+                max_tok = 500
             else:
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + time_context
-                max_tok = 120 # УВЕЛИЧЕНО ДЛЯ ЧАТА
+                max_tok = 120
 
             await save_user_message(chat_id, user_id, "user", final_text)
             safe_history = truncate_history(history[-4:]) 
