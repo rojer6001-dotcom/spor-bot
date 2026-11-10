@@ -66,7 +66,7 @@ class UserMessage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True) 
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    sender_name: Mapped[str] = mapped_column(String(100)) # <-- НОВОЕ ПОЛЕ
+    sender_name: Mapped[str] = mapped_column(String(100))
     role: Mapped[str] = mapped_column(String(50))
     content: Mapped[str] = mapped_column(Text)
 
@@ -91,7 +91,6 @@ class UserFact(Base):
     fact_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-# ВАЖНО: Изменил имя БД на v4
 engine = create_async_engine("sqlite+aiosqlite:///bot_memory_v4.db", echo=False) 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -139,7 +138,8 @@ AGENTS = {
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
             "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
             "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
-            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова."
+            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова. "
+            "ВАЖНО ПРО ИМЕНА: Не используй имя собеседника в каждом ответе. В живом чате люди редко обращаются по имени, только если хотят подчеркнуть мысль или привлечь внимание."
         ),
         "model": "deepseek-v4.1-flash"
     },
@@ -166,10 +166,8 @@ async def get_user_history(chat_id: int, user_id: int) -> list:
         history = []
         for m in reversed(messages):
             if m.role == "user":
-                # Добавляем имя автора в историю для пользователя
                 history.append({"role": "user", "content": f"[{m.sender_name}]: {m.content}"})
             else:
-                # Для ассистента оставляем как есть, чтобы он понимал, что это его слова
                 history.append({"role": "assistant", "content": m.content})
         return history
 
@@ -551,7 +549,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 agent = AGENTS["code"]
                 final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
                 temp = 0.7
-                active_prompt = agent["prompt"] + f"\nСейчас ты отвечаешь пользователю по имени {sender_name}. Обращайся к нему." + time_context
+                active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}." + time_context
                 max_tok = 1500
             elif is_political_request:
                 agent = AGENTS["political"]
@@ -561,14 +559,13 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     search_results = await search_tavily(text)
                     final_text = f"Тема: \"{text}\"\n\nДанные:\n---\n{search_results}\n---\nДай КРАТКИЙ ответ (1-3 предложения) ПРОСТЫМ языком."
                 temp = 0.7
-                active_prompt = agent["prompt"] + f"\nСейчас ты отвечаешь пользователю по имени {sender_name}. Обращайся к нему." + time_context
+                active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}." + time_context
                 max_tok = 500
             else:
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.85
-                # ДОБАВЛЕНО: Жесткое указание, кому отвечать
-                active_prompt = agent["prompt"] + f"\nСейчас ты отвечаешь пользователю по имени {sender_name}. Обращайся к нему. В истории диалога сообщения других людей помечены квадратными скобками, не путай их с {sender_name}." + time_context
+                active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}. Не используй его имя в каждом ответе, только если это уместно." + time_context
                 max_tok = 120
 
             await save_user_message(chat_id, user_id, sender_name, "user", final_text)
