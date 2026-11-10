@@ -50,7 +50,7 @@ FILE_TTL_SECONDS = 600
 MAX_PARALLEL_REQUESTS = 3
 CHANCE_TO_JOIN_CHAT = 0.1 
 CHAT_JOIN_COOLDOWN = 300 
-CHANCE_TO_COMMENT_NEWS = 0.05 # 5% на новости
+CHANCE_TO_COMMENT_NEWS = 0.05
 
 api_semaphore = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
 user_locks = defaultdict(asyncio.Lock)
@@ -66,6 +66,7 @@ class UserMessage(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True) 
     user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    sender_name: Mapped[str] = mapped_column(String(100)) # <-- НОВОЕ ПОЛЕ
     role: Mapped[str] = mapped_column(String(50))
     content: Mapped[str] = mapped_column(Text)
 
@@ -90,7 +91,8 @@ class UserFact(Base):
     fact_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
-engine = create_async_engine("sqlite+aiosqlite:///bot_memory_v2.db", echo=False)
+# ВАЖНО: Изменил имя БД на v4
+engine = create_async_engine("sqlite+aiosqlite:///bot_memory_v4.db", echo=False) 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 message_buffers = {} 
@@ -132,7 +134,7 @@ AGENTS = {
         "prompt": (
             "Ты — Нафаня, обычный живой человек в чате. Твоя главная задача — общаться кратко (1-2 предложения). "
             "НИКАКОЙ аналитики, политологии, канцелярита и поучительного тона. Ты не учитель, ты просто друг.\n"
-            "Если пользователь комментирует новость с сарказмом или шутит (например, пишет 'довыебывался?'), просто поддержи шутку. Скажи что-то вроде 'Ага, доигрался', 'Сам виноват', 'Ну а чё он хотел?'. "
+            "Если пользователь комментирует новость с сарказмом или шутит, просто поддержи шутку. "
             "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать фразы вроде 'на скриншоте репост', 'важная разница', 'это не прямое заявление'. Не анализируй скриншоты, просто отвечай на текст пользователя.\n"
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
             "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
@@ -148,7 +150,7 @@ AGENTS = {
     "political": {
         "prompt": (
             "Ты — Нафаня. Ты обсуждаешь новости с другом. Твоя задача — реагировать на комментарий пользователя к новости, а не анализировать саму новость. "
-            "Если пользователь шутит (например: 'довыебывался?'), ответь коротко и с иронией (например: 'Ага, доигрался'). "
+            "Если пользователь шутит, ответь коротко и с иронией. "
             "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать фразы вроде «актуальность лучше уточнить», «на скриншоте репост», «это важная разница». "
             "Отвечай как живой человек: коротко (1-3 предложения). Никакой политологической воды. Всегда заканчивай мысль, не обрывай предложения на полуслове."
         ),
@@ -160,11 +162,20 @@ AGENTS = {
 async def get_user_history(chat_id: int, user_id: int) -> list:
     async with async_session() as session:
         result = await session.execute(select(UserMessage).where(UserMessage.chat_id == chat_id, UserMessage.user_id == user_id).order_by(UserMessage.id.desc()).limit(10))
-        return [{"role": m.role, "content": m.content} for m in reversed(result.scalars().all())]
+        messages = result.scalars().all()
+        history = []
+        for m in reversed(messages):
+            if m.role == "user":
+                # Добавляем имя автора в историю для пользователя
+                history.append({"role": "user", "content": f"[{m.sender_name}]: {m.content}"})
+            else:
+                # Для ассистента оставляем как есть, чтобы он понимал, что это его слова
+                history.append({"role": "assistant", "content": m.content})
+        return history
 
-async def save_user_message(chat_id: int, user_id: int, role: str, content: str):
+async def save_user_message(chat_id: int, user_id: int, sender_name: str, role: str, content: str):
     async with async_session() as session:
-        session.add(UserMessage(chat_id=chat_id, user_id=user_id, role=role, content=content))
+        session.add(UserMessage(chat_id=chat_id, user_id=user_id, sender_name=sender_name, role=role, content=content))
         await session.commit()
 
 async def get_chat_context(chat_id: int) -> list:
@@ -310,11 +321,8 @@ REMINDER_CREATE_TRIGGERS = ["напомни", "поставь таймер", "с
 REMINDER_LIST_TRIGGERS = ["какие таймеры", "мои напоминания", "список напоминаний", "активные таймеры", "покажи напоминания", "какие есть напоминания"]
 REMINDER_DELETE_TRIGGERS = ["удали таймер", "удали напоминание", "отмени напоминание", "убери таймер", "удали все напоминания", "отмени все таймеры"]
 
-# Регулярка для приветствий и список эмодзи
 GREETING_REGEX = re.compile(r'\b(привет|приветик|здравствуйте|хай|ку|доброе утро|утро доброе|добрый день|день добрый|добрый вечер|вечер добрый|приветствую|здорово|салют|здарова)\b', re.IGNORECASE)
 GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
-
-# Реакции на гифки
 ANIMATION_REACTIONS = ["😹", "🤣", "🔥", "💯", "Ору", "Ржака", "Смешно", "Ахаха", "Ну ты выдал"]
 
 # --- ФУНКЦИЯ ИЗВЛЕЧЕНИЯ КАДРОВ ИЗ ГИФКИ ---
@@ -380,6 +388,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     if not message.from_user: return 
     user_id = message.from_user.id
     chat_id = message.chat.id
+    sender_name = message.from_user.first_name or "Кто-то"
     key = (chat_id, user_id)
     
     if len(text) > MAX_TEXT_LENGTH:
@@ -389,10 +398,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     text_lower = text.lower()
     words = text_lower.split()
     
-    # 1. Определяем, что это ТОЛЬКО приветствие
     is_greeting_only = bool(GREETING_REGEX.search(text_lower)) and len(words) <= 3
 
-    # 2. Подтягиваем контекст реплая (если это реплай и не просто приветствие)
     reply_context = ""
     if message.reply_to_message and not is_greeting_only:
         replied = message.reply_to_message
@@ -400,11 +407,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         if reply_context:
             text = f"[В ответ на сообщение: \"{reply_context}\"]\n{text}"
     
-    # 3. Запускаем фоновое извлечение фактов
     if text and not image_b64 and not frames_b64:
         asyncio.create_task(extract_and_save_facts(user_id, text))
-    
-    sender_name = message.from_user.first_name or "Кто-то"
     
     if not image_b64 and not frames_b64:
         await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
@@ -421,7 +425,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
 
-    # 4. Рандом для новостей (только если это НЕ реплай на бота и НЕ тег)
     if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
         if random.random() > CHANCE_TO_COMMENT_NEWS:
             return
@@ -548,7 +551,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 agent = AGENTS["code"]
                 final_text = f"Проанализируй этот код или ошибку:\n\n{text}"
                 temp = 0.7
-                active_prompt = agent["prompt"] + time_context
+                active_prompt = agent["prompt"] + f"\nСейчас ты отвечаешь пользователю по имени {sender_name}. Обращайся к нему." + time_context
                 max_tok = 1500
             elif is_political_request:
                 agent = AGENTS["political"]
@@ -558,16 +561,17 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     search_results = await search_tavily(text)
                     final_text = f"Тема: \"{text}\"\n\nДанные:\n---\n{search_results}\n---\nДай КРАТКИЙ ответ (1-3 предложения) ПРОСТЫМ языком."
                 temp = 0.7
-                active_prompt = agent["prompt"] + time_context
+                active_prompt = agent["prompt"] + f"\nСейчас ты отвечаешь пользователю по имени {sender_name}. Обращайся к нему." + time_context
                 max_tok = 500
             else:
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.85
-                active_prompt = agent["prompt"] + time_context
+                # ДОБАВЛЕНО: Жесткое указание, кому отвечать
+                active_prompt = agent["prompt"] + f"\nСейчас ты отвечаешь пользователю по имени {sender_name}. Обращайся к нему. В истории диалога сообщения других людей помечены квадратными скобками, не путай их с {sender_name}." + time_context
                 max_tok = 120
 
-            await save_user_message(chat_id, user_id, "user", final_text)
+            await save_user_message(chat_id, user_id, sender_name, "user", final_text)
             
             if is_greeting_only:
                 safe_history = []
@@ -577,7 +581,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             if frames_b64:
                 messages = [{"role": "system", "content": active_prompt}]
                 for h in safe_history: messages.append(h)
-                user_content = [{"type": "text", "text": f"Пользователь отправил гифку и спрашивает: {final_text}. Вот несколько кадров из неё:"}]
+                user_content = [{"type": "text", "text": f"Пользователь {sender_name} отправил гифку и спрашивает: {final_text}. Вот несколько кадров из неё:"}]
                 for frame in frames_b64:
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}})
                 messages.append({"role": "user", "content": user_content})
@@ -601,7 +605,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             
             if bot_reply:
                 await send_long_message(message, bot_reply)
-                await save_user_message(chat_id, user_id, "assistant", bot_reply)
+                await save_user_message(chat_id, user_id, "Нафаня", "assistant", bot_reply)
             else:
                 if is_political_request:
                      await message.reply("Слушай, у меня нет слов. Давай сменим тему.")
@@ -690,7 +694,7 @@ async def handle_photo(message: types.Message):
                 response = await client.chat.completions.create(model="gpt-6.1-sol", messages=[{"role": "system", "content": "Опиши картинку кратко."}, {"role": "user", "content": [{"type": "text", "text": "Что тут?"}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}}]}], temperature=0.5, max_tokens=150)
             desc = safe_get_content(response)
             if desc:
-                await save_user_message(chat_id, user_id, "user", f"[Пользователь отправил фото. На нем: {desc}]")
+                await save_user_message(chat_id, user_id, message.from_user.first_name or "Кто-то", "user", f"[Пользователь отправил фото. На нем: {desc}]")
             try: await message.react([types.ReactionTypeEmoji(emoji="👀")])
             except: pass
     except Exception as e: await message.reply("Не удалось обработать фото.")
@@ -757,7 +761,7 @@ async def handle_document(message: types.Message):
         bot_reply = safe_get_content(response)
         if bot_reply:
             await send_long_message(message, bot_reply)
-            await save_user_message(chat_id, user_id, "assistant", bot_reply)
+            await save_user_message(chat_id, user_id, "Нафаня", "assistant", bot_reply)
         else: await message.reply("Не могу проанализировать файл, движок вернул пустоту.")
     except Exception: await message.reply("Не удалось прочитать файл.")
     finally: typing_task.cancel()
@@ -796,7 +800,7 @@ async def handle_message(message: types.Message):
                     bot_reply = safe_get_content(response)
                     if bot_reply:
                         await send_long_message(message, bot_reply)
-                        await save_user_message(chat_id, user_id, "assistant", bot_reply)
+                        await save_user_message(chat_id, user_id, "Нафаня", "assistant", bot_reply)
                     else: await message.reply("Движок вернул пустоту. Попробуй еще раз.")
                     pending_files.pop(key, None)
                 except Exception: await message.reply("Ошибка при обработке файла.")
@@ -818,7 +822,7 @@ async def main():
     await bot.delete_webhook(drop_pending_updates=False) 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    logging.info("База данных готова.")
+    logging.info("База данных v4 готова.")
     asyncio.create_task(cleanup_db())
     asyncio.create_task(reminder_worker())
     logging.info("Запуск бота...")
