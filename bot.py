@@ -386,21 +386,24 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         await message.reply(f"Слишком длинный текст ({len(text)} символов). Максимум — {MAX_TEXT_LENGTH}.")
         return
     
-    # --- НОВАЯ ЛОГИКА: ПОДТЯГИВАЕМ ТЕКСТ СООБЩЕНИЯ, НА КОТОРОЕ ОТВЕТИЛИ ---
+    text_lower = text.lower()
+    words = text_lower.split()
+    
+    # 1. Определяем, что это ТОЛЬКО приветствие
+    is_greeting_only = bool(GREETING_REGEX.search(text_lower)) and len(words) <= 3
+
+    # 2. Подтягиваем контекст реплая (если это реплай и не просто приветствие)
     reply_context = ""
-    if message.reply_to_message:
+    if message.reply_to_message and not is_greeting_only:
         replied = message.reply_to_message
         reply_context = replied.text or replied.caption or ""
         if reply_context:
             text = f"[В ответ на сообщение: \"{reply_context}\"]\n{text}"
-    # -------------------------------------------------------------------------
-
-    # Запускаем фоновое извлечение фактов (не блокирует ответ)
+    
+    # 3. Запускаем фоновое извлечение фактов
     if text and not image_b64 and not frames_b64:
         asyncio.create_task(extract_and_save_facts(user_id, text))
     
-    text_lower = text.lower()
-    words = text_lower.split()
     sender_name = message.from_user.first_name or "Кто-то"
     
     if not image_b64 and not frames_b64:
@@ -418,9 +421,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
 
+    # 4. Рандом для новостей (только если это НЕ реплай, иначе отвечаем 100%)
     if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
-        if random.random() > CHANCE_TO_COMMENT_NEWS:
-            return
+        if not message.reply_to_message: # Если это не реплай
+            if random.random() > CHANCE_TO_COMMENT_NEWS:
+                return
 
     if is_political_request: 
         pass
@@ -548,7 +553,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 max_tok = 1500
             elif is_political_request:
                 agent = AGENTS["political"]
-                if message.reply_to_message:
+                if message.reply_to_message and not is_greeting_only:
                     final_text = f"Пользователь комментирует новость словами: \"{text}\".\nОтветь на его комментарий коротко и по-дружески."
                 else:
                     search_results = await search_tavily(text)
@@ -564,7 +569,12 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 max_tok = 120
 
             await save_user_message(chat_id, user_id, "user", final_text)
-            safe_history = truncate_history(history[-4:]) 
+            
+            # 5. Если это просто приветствие, НЕ подтягиваем историю чата (чтобы не было старых новостей)
+            if is_greeting_only:
+                safe_history = []
+            else:
+                safe_history = truncate_history(history[-4:]) 
             
             if frames_b64:
                 messages = [{"role": "system", "content": active_prompt}]
