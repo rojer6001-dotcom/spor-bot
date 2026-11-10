@@ -50,7 +50,7 @@ FILE_TTL_SECONDS = 600
 MAX_PARALLEL_REQUESTS = 3
 CHANCE_TO_JOIN_CHAT = 0.1 
 CHAT_JOIN_COOLDOWN = 300 
-CHANCE_TO_COMMENT_NEWS = 0.3 
+CHANCE_TO_COMMENT_NEWS = 0.05 # 5% на новости
 
 api_semaphore = asyncio.Semaphore(MAX_PARALLEL_REQUESTS)
 user_locks = defaultdict(asyncio.Lock)
@@ -421,11 +421,10 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
 
-    # 4. Рандом для новостей (только если это НЕ реплай, иначе отвечаем 100%)
+    # 4. Рандом для новостей (только если это НЕ реплай на бота и НЕ тег)
     if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
-        if not message.reply_to_message: # Если это не реплай
-            if random.random() > CHANCE_TO_COMMENT_NEWS:
-                return
+        if random.random() > CHANCE_TO_COMMENT_NEWS:
+            return
 
     if is_political_request: 
         pass
@@ -570,7 +569,6 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
             await save_user_message(chat_id, user_id, "user", final_text)
             
-            # 5. Если это просто приветствие, НЕ подтягиваем историю чата (чтобы не было старых новостей)
             if is_greeting_only:
                 safe_history = []
             else:
