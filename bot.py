@@ -139,7 +139,8 @@ AGENTS = {
             "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
             "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
             "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова. "
-            "ВАЖНО ПРО ИМЕНА: Не используй имя собеседника в каждом ответе. В живом чате люди редко обращаются по имени, только если хотят подчеркнуть мысль или привлечь внимание."
+            "ВАЖНО ПРО ИМЕНА: Не используй имя собеседника в каждом ответе. В живом чате люди редко обращаются по имени. "
+            "ЗАПРЕЩЕНО отвечать просто 'Чё?', 'Слушаю' или 'Да?' на сложные сообщения. Если тебе что-то непонятно, ответь с юмором (например: 'Ты сейчас на каком языке?' или 'Я аж поперхнулся')."
         ),
         "model": "deepseek-v4.1-flash"
     },
@@ -451,7 +452,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                     response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=100)
                 reply = safe_get_content(response)
                 if reply: await send_long_message(message, reply)
-                else: await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
+                else: await message.reply("Слушай, я тут немного завис. О чём вы?")
             except Exception as e: logging.error(f"Ошибка вклинивания: {e}")
             finally: typing_task.cancel()
         return 
@@ -604,10 +605,11 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 await send_long_message(message, bot_reply)
                 await save_user_message(chat_id, user_id, "Нафаня", "assistant", bot_reply)
             else:
+                # Если пусто, не пишем "Чё?", а отвечаем осмысленно
                 if is_political_request:
                      await message.reply("Слушай, у меня нет слов. Давай сменим тему.")
                 else:
-                     await message.reply(random.choice(["Чё?", "Слушаю.", "Да?", "Чего тебе?"]))
+                     await message.reply("Слушай, я аж завис. Ты о чём вообще?")
             
         except Exception as e:
             error_str = str(e).lower()
