@@ -44,10 +44,10 @@ client = AsyncOpenAI(
 
 # --- НАСТРОЙКИ МОДЕЛЕЙ ---
 MODELS = {
-    "smart": "gpt-6.1-sol",             # Для умных ответов на вопросы
-    "humor": "gpt-6-luna",              # Для шуток
-    "aggressive": "kimi-k3.1-pro",      # Для агрессии
-    "chat": "deepseek-v4.1-flash",      # Для обычного трепа
+    "smart": "gpt-6.1-sol",             
+    "humor": "gpt-6-luna",              
+    "aggressive": "kimi-k3.1-pro",      
+    "chat": "deepseek-v4.1-flash",      
     "code": "gpt-6.1-sol",              
     "political": "gpt-6.1-sol"          
 }
@@ -137,7 +137,7 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ ---
+# --- АГЕНТЫ (С ПРАВИЛОМ ЗАКАНЧИВАТЬ МЫСЛЬ) ---
 AGENTS = {
     "smart": {
         "prompt": (
@@ -145,8 +145,7 @@ AGENTS = {
             "Ты можешь использовать свои знания, чтобы объяснить сложные вещи простым языком. "
             "Если вопрос требует фактов, дай их. Если это совет — предложи несколько вариантов. "
             "Отвечай по делу, без воды, но достаточно подробно (3-5 предложений). "
-            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. "
-            "Не используй имя собеседника в каждом ответе."
+            "ВАЖНО: Всегда заканчивай мысль и ставь точку. Не обрывай предложение на полуслове."
         ),
         "model": MODELS["smart"]
     },
@@ -155,7 +154,7 @@ AGENTS = {
             "Ты — Нафаня, обычный живой человек в чате. Твоя главная задача — отвечать с юмором и иронией. "
             "Если пользователь шутит или подкалывает, ответь так, чтобы было смешно. "
             "Не пытайся быть стендап-комиком, шути естественно. Отвечай коротко (1-2 предложения). "
-            "Если пользователь грубит — можешь ответить дерзко, используя крепкие выражения."
+            "ВАЖНО: Всегда заканчивай мысль. Не обрывай шутку на середине, лучше сократи, но поставь точку."
         ),
         "model": MODELS["humor"]
     },
@@ -163,7 +162,7 @@ AGENTS = {
         "prompt": (
             "Ты — Нафаня. Тебя только что оскорбили. Отвечай жестко, зло и дерзко. "
             "Используй крепкие выражения (мат), но не перегибай, чтобы не сработали фильтры. "
-            "Отвечай коротко (1 предложение). Пошли собеседника нахуй."
+            "Отвечай коротко (1 предложение). Пошли собеседника нахуй. Всегда ставь точку в конце."
         ),
         "model": MODELS["aggressive"]
     },
@@ -176,9 +175,7 @@ AGENTS = {
             "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
             "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
             "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
-            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова. "
-            "ВАЖНО ПРО ИМЕНА: Не используй имя собеседника в каждом ответе. В живом чате люди редко обращаются по имени. "
-            "ЗАПРЕЩЕНО отвечать просто 'Чё?', 'Слушаю' или 'Да?' на сложные сообщения. Если тебе что-то непонятно, ответь с юмором."
+            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова."
         ),
         "model": MODELS["chat"]
     },
@@ -493,7 +490,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
             typing_task = asyncio.create_task(keep_typing(chat_id))
             try:
                 async with api_semaphore:
-                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=100)
+                    response = await client.chat.completions.create(model=agent["model"], messages=[{"role": "system", "content": agent["prompt"]}, {"role": "user", "content": prompt}], temperature=0.9, max_tokens=150)
                 reply = safe_get_content(response)
                 if reply: await send_long_message(message, reply)
                 else: await message.reply("Слушай, я тут немного завис. О чём вы?")
@@ -617,7 +614,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 max_tok = 500
                 model_to_use = agent["model"]
             elif is_question:
-                # Используем умную модель для ответов на вопросы
+                # Умная модель для вопросов, увеличен лимит токенов
                 agent = AGENTS["smart"]
                 final_text = text
                 temp = 0.7
@@ -625,20 +622,20 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 max_tok = 500
                 model_to_use = agent["model"]
             elif is_greeting_only or is_reply_to_bot:
-                # Используем humor для шуток
+                # Модель для шуток, увеличен лимит токенов
                 agent = AGENTS["humor"]
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}." + time_context
-                max_tok = 120
+                max_tok = 250
                 model_to_use = agent["model"]
             else:
-                # Обычный чат
+                # Обычный чат, увеличен лимит токенов
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.85
                 active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}. Не используй его имя в каждом ответе, только если это уместно." + time_context
-                max_tok = 120
+                max_tok = 250
                 model_to_use = agent["model"]
 
             await save_user_message(chat_id, user_id, sender_name, "user", final_text)
@@ -655,7 +652,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 for frame in frames_b64:
                     user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}})
                 messages.append({"role": "user", "content": user_content})
-                model_to_use = "gpt-6.1-sol" # Для зрения оставляем сильную модель
+                model_to_use = "gpt-6.1-sol" 
             elif image_b64:
                 messages = [{"role": "system", "content": active_prompt}] + safe_history + [{"role": "user", "content": [{"type": "text", "text": final_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}]}]
                 model_to_use = "gpt-6.1-sol" 
