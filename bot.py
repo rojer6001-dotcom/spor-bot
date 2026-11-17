@@ -42,13 +42,14 @@ client = AsyncOpenAI(
     timeout=120.0 
 )
 
-# --- НАСТРОЙКИ МОДЕЛЕЙ (МАРШРУТИЗАТОР) ---
+# --- НАСТРОЙКИ МОДЕЛЕЙ ---
 MODELS = {
-    "chat": "deepseek-v4.1-flash",       # Обычный треп
-    "humor": "gpt-6-luna",               # Добрые шутки
-    "aggressive": "kimi-k3.1-pro",       # Злые ответы на хамство
-    "code": "gpt-6.1-sol",               # Код
-    "political": "gpt-6.1-sol"           # Политика
+    "smart": "gpt-6.1-sol",             # Для умных ответов на вопросы
+    "humor": "gpt-6-luna",              # Для шуток
+    "aggressive": "kimi-k3.1-pro",      # Для агрессии
+    "chat": "deepseek-v4.1-flash",      # Для обычного трепа
+    "code": "gpt-6.1-sol",              
+    "political": "gpt-6.1-sol"          
 }
 
 # --- ЛИМИТЫ ---
@@ -138,20 +139,16 @@ async def search_jamendo(query: str) -> dict | None:
 
 # --- АГЕНТЫ ---
 AGENTS = {
-    "chat": {
+    "smart": {
         "prompt": (
-            "Ты — Нафаня, обычный живой человек в чате. Твоя главная задача — общаться кратко (1-2 предложения). "
-            "НИКАКОЙ аналитики, политологии, канцелярита и поучительного тона. Ты не учитель, ты просто друг.\n"
-            "Если пользователь комментирует новость с сарказмом или шутит, просто поддержи шутку. "
-            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать фразы вроде 'на скриншоте репост', 'важная разница', 'это не прямое заявление'. Не анализируй скриншоты, просто отвечай на текст пользователя.\n"
-            "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
-            "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
-            "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
-            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова. "
-            "ВАЖНО ПРО ИМЕНА: Не используй имя собеседника в каждом ответе. В живом чате люди редко обращаются по имени. "
-            "ЗАПРЕЩЕНО отвечать просто 'Чё?', 'Слушаю' или 'Да?' на сложные сообщения. Если тебе что-то непонятно, ответь с юмором."
+            "Ты — Нафаня, умный и эрудированный собеседник. Твоя задача — дать развернутый, полезный и точный ответ на вопрос пользователя. "
+            "Ты можешь использовать свои знания, чтобы объяснить сложные вещи простым языком. "
+            "Если вопрос требует фактов, дай их. Если это совет — предложи несколько вариантов. "
+            "Отвечай по делу, без воды, но достаточно подробно (3-5 предложений). "
+            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. "
+            "Не используй имя собеседника в каждом ответе."
         ),
-        "model": MODELS["chat"]
+        "model": MODELS["smart"]
     },
     "humor": {
         "prompt": (
@@ -169,6 +166,21 @@ AGENTS = {
             "Отвечай коротко (1 предложение). Пошли собеседника нахуй."
         ),
         "model": MODELS["aggressive"]
+    },
+    "chat": {
+        "prompt": (
+            "Ты — Нафаня, обычный живой человек в чате. Твоя главная задача — общаться кратко (1-2 предложения). "
+            "НИКАКОЙ аналитики, политологии, канцелярита и поучительного тона. Ты не учитель, ты просто друг.\n"
+            "Если пользователь комментирует новость с сарказмом или шутит, просто поддержи шутку. "
+            "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО писать фразы вроде 'на скриншоте репост', 'важная разница', 'это не прямое заявление'. Не анализируй скриншоты, просто отвечай на текст пользователя.\n"
+            "Если пользователь грубит, называет тебя тупым или пытается затроллить: НЕ ОПРАВДЫВАЙСЯ. Просто коротко пошли его нахуй (например: «Иди нахуй», «Сам тупой», «Отвали, заебал»).\n"
+            "Если пользователь стебется над твоим предыдущим ответом: ответь «Не читай» или «Пошел нахуй». "
+            "Постарайся использовать крепкие выражения, но не перегибай, чтобы не сработали фильтры. "
+            "ВАЖНО: Ты больше не умеешь рисовать. Если просят нарисовать — откажись. Всегда заканчивай мысль, не обрывай слова. "
+            "ВАЖНО ПРО ИМЕНА: Не используй имя собеседника в каждом ответе. В живом чате люди редко обращаются по имени. "
+            "ЗАПРЕЩЕНО отвечать просто 'Чё?', 'Слушаю' или 'Да?' на сложные сообщения. Если тебе что-то непонятно, ответь с юмором."
+        ),
+        "model": MODELS["chat"]
     },
     "code": {
         "prompt": "Ты — Нафаня, опытный программист. Объясняй ошибки и баги четко, технически точно и по делу. Пиши только то, что поможет решить проблему. Всегда заканчивай мысль.",
@@ -350,8 +362,9 @@ GREETING_REGEX = re.compile(r'\b(привет|приветик|здравств�
 GREETING_REACTIONS = ["🥰", "❤️", "🤝", "🍓"]
 ANIMATION_REACTIONS = ["😹", "🤣", "🔥", "💯", "Ору", "Ржака", "Смешно", "Ахаха", "Ну ты выдал"]
 
-# --- ТРИГГЕРЫ ДЛЯ АГРЕССИИ ---
+# --- ТРИГГЕРЫ ДЛЯ АГРЕССИИ И ВОПРОСОВ ---
 AGGRESSIVE_TRIGGERS = ["тупой", "дурак", "идиот", "дебил", "лох", "мудак", "козел", "заебал", "надоел", "тупица", "кретин"]
+QUESTION_WORDS = ["почему", "как", "что такое", "кто такой", "сколько", "где", "когда", "зачем", "какой", "какая", "объясни"]
 
 # --- ФУНКЦИЯ ИЗВЛЕЧЕНИЯ КАДРОВ ИЗ ГИФКИ ---
 async def extract_gif_frames(gif_data: bytes, num_frames: int = 3) -> list[bytes]:
@@ -447,7 +460,8 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
     is_detail_request = any(trigger in text_lower for trigger in DETAIL_TRIGGERS)
     is_music_request = any(trigger in text_lower for trigger in MUSIC_TRIGGERS)
     is_aggressive = any(trigger in text_lower for trigger in AGGRESSIVE_TRIGGERS)
-    
+    is_question = text.strip().endswith("?") or any(word in text_lower for word in QUESTION_WORDS)
+
     is_reminder_create = any(trigger in text_lower for trigger in REMINDER_CREATE_TRIGGERS)
     is_reminder_list = any(trigger in text_lower for trigger in REMINDER_LIST_TRIGGERS)
     is_reminder_delete = any(trigger in text_lower for trigger in REMINDER_DELETE_TRIGGERS)
@@ -466,7 +480,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     is_group = message.chat.type in ["group", "supergroup"]
     
-    if is_group and not image_b64 and not frames_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete or is_music_request or is_aggressive):
+    if is_group and not image_b64 and not frames_b64 and not (is_triggered or is_reply_to_bot or is_code_request or is_political_request or is_detail_request or is_reminder_create or is_reminder_list or is_reminder_delete or is_music_request or is_aggressive or is_question):
         now = time.time()
         if chat_id in chat_join_cooldowns and now - chat_join_cooldowns[chat_id] < CHAT_JOIN_COOLDOWN: return
         if random.random() < CHANCE_TO_JOIN_CHAT:
@@ -598,6 +612,14 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 else:
                     search_results = await search_tavily(text)
                     final_text = f"Тема: \"{text}\"\n\nДанные:\n---\n{search_results}\n---\nДай КРАТКИЙ ответ (1-3 предложения) ПРОСТЫМ языком."
+                temp = 0.7
+                active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}." + time_context
+                max_tok = 500
+                model_to_use = agent["model"]
+            elif is_question:
+                # Используем умную модель для ответов на вопросы
+                agent = AGENTS["smart"]
+                final_text = text
                 temp = 0.7
                 active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}." + time_context
                 max_tok = 500
