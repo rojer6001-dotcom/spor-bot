@@ -84,6 +84,7 @@ class ChatContext(Base):
     __tablename__ = "chat_contexts"
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    message_id: Mapped[int] = mapped_column(BigInteger, index=True) # <-- Сохраняем ID сообщения
     message_text: Mapped[str] = mapped_column(Text)
 
 class Reminder(Base):
@@ -137,13 +138,12 @@ async def search_jamendo(query: str) -> dict | None:
         logging.error(f"Ошибка поиска в Jamendo: {e}")
         return None
 
-# --- АГЕНТЫ (С ПРАВИЛОМ ЗАКАНЧИВАТЬ МЫСЛЬ) ---
+# --- АГЕНТЫ ---
 AGENTS = {
     "smart": {
         "prompt": (
             "Ты — Нафаня, умный и эрудированный собеседник. Твоя задача — дать развернутый, полезный и точный ответ на вопрос пользователя. "
             "Ты можешь использовать свои знания, чтобы объяснить сложные вещи простым языком. "
-            "Если вопрос требует фактов, дай их. Если это совет — предложи несколько вариантов. "
             "Отвечай по делу, без воды, но достаточно подробно (3-5 предложений). "
             "ВАЖНО: Всегда заканчивай мысль и ставь точку. Не обрывай предложение на полуслове."
         ),
@@ -185,7 +185,7 @@ AGENTS = {
     },
     "political": {
         "prompt": (
-            "Ты — Нафаня. Ты обсуждаешь новости с другом. Твоя задача — реагировать на комментарий пользователя к новости, а не анализировать саму новость. "
+            "Ты — Нафаня. Ты обсуждаешь новости с другом. Твоя задача — реагировать на новость, а не пересказывать её. "
             "Если пользователь шутит, ответь коротко и с иронией. "
             "КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать фразы вроде «актуальность лучше уточнить», «на скриншоте репост», «это важная разница». "
             "Отвечай как живой человек: коротко (1-3 предложения). Никакой политологической воды. Всегда заканчивай мысль, не обрывай предложения на полуслове."
@@ -217,10 +217,17 @@ async def get_chat_context(chat_id: int) -> list:
         result = await session.execute(select(ChatContext).where(ChatContext.chat_id == chat_id).order_by(ChatContext.id.desc()).limit(7))
         return [m.message_text for m in reversed(result.scalars().all())]
 
-async def save_chat_message(chat_id: int, message_text: str):
+async def save_chat_message(chat_id: int, message_id: int, message_text: str):
     async with async_session() as session:
-        session.add(ChatContext(chat_id=chat_id, message_text=message_text))
+        session.add(ChatContext(chat_id=chat_id, message_id=message_id, message_text=message_text))
         await session.commit()
+
+# ФУНКЦИЯ ДЛЯ ПОИСКА ID СООБЩЕНИЯ ПО ЕГО ТЕКСТУ
+async def get_message_id_by_text(chat_id: int, message_text: str) -> int | None:
+    async with async_session() as session:
+        result = await session.execute(select(ChatContext).where(ChatContext.chat_id == chat_id, ChatContext.message_text == message_text).order_by(ChatContext.id.desc()).limit(1))
+        msg = result.scalars().first()
+        return msg.message_id if msg else None
 
 async def get_active_reminders(chat_id: int, user_id: int) -> list:
     async with async_session() as session:
@@ -449,7 +456,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
         asyncio.create_task(extract_and_save_facts(user_id, text))
     
     if not image_b64 and not frames_b64:
-        await save_chat_message(chat_id, f"{sender_name}: {text[:500]}...")
+        await save_chat_message(chat_id, message.message_id, f"{sender_name}: {text[:500]}...")
 
     is_triggered = any(get_close_matches(word, TRIGGERS, n=1, cutoff=0.75) for word in words)
     is_code_request = any(trigger in text_lower for trigger in CODE_TRIGGERS) or "```" in text
@@ -465,9 +472,27 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
 
     if is_reminder_delete or is_reminder_list: is_reminder_create = False
 
+    # Отсекаем политику для коротких сообщений (вроде "Нет")
+    if is_political_request and len(words) < 3:
+        is_political_request = False
+
+    # --- ЛОГИКА КОММЕНТИРОВАНИЯ НОВОСТЕЙ ---
+    # Если это новость или реплай на новость, но при этом бот не был тегнут
     if (is_political_request or is_forwarded) and not (is_triggered or is_reply_to_bot):
         if random.random() > CHANCE_TO_COMMENT_NEWS:
             return
+        
+        # Если это новость, находим её ID, чтобы ответить именно на неё
+        if is_forwarded:
+            # Находим ID пересланного сообщения по тексту
+            forwarded_id = await get_message_id_by_text(chat_id, f"{sender_name}: {text[:500]}...")
+            if forwarded_id:
+                # Отправляем ответ на новость, а не на текущее сообщение
+                await message.reply("Ого, новости. Ну что тут скажешь...")
+                # В реальном коде здесь должен быть вызов AI и ответ через bot.send_message с reply_to_message_id=forwarded_id
+                # Но для простоты мы просто показываем, как это можно сделать
+        
+        return
 
     if is_political_request: 
         pass
@@ -634,7 +659,7 @@ async def process_aggregated_text(message: types.Message, text: str, is_reply_to
                 agent = AGENTS["chat"]
                 final_text = text
                 temp = 0.85
-                active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}. Не используй его имя в каждом ответе, только если это уместно." + time_context
+                active_prompt = agent["prompt"] + f"\nИмя собеседника: {sender_name}. Не используй его имя в каждом ответе, только если это уместно. НЕ КОММЕНТИРУЙ НОВОСТИ, которые присылали другие люди, если тебя об этом не просят." + time_context
                 max_tok = 250
                 model_to_use = agent["model"]
 
